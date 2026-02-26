@@ -414,8 +414,6 @@ class VideoEditorApp:
     def get_gpx_duration(self):
         if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']:
             return float(self.gpx_data['segments'][-1]['end'])
-        if isinstance(self.gpx_data, list) and len(self.gpx_data) > 0 and 'time_offset' in self.gpx_data[-1]:
-            return float(self.gpx_data[-1]['time_offset'])
         return 0.0
     
     def _get_latlon_at_gpx_time(self, t):
@@ -447,12 +445,7 @@ class VideoEditorApp:
         return None, None
     
     def update_align_controls(self):
-        has_data = False
-        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']:
-            has_data = True
-        elif isinstance(self.gpx_data, list) and len(self.gpx_data) > 0:
-            has_data = True
-        if not has_data:
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
             self.align_scale.config(from_=0.0, to=0.0)
             self.align_progress_var.set(0.0)
             self.align_time_label.config(text="GPX时间: 0.0s")
@@ -533,7 +526,8 @@ class VideoEditorApp:
         selected_gpx_time = duration - raw_gpx_time if self.align_reverse_var.get() else raw_gpx_time
         self.gpx_offset = selected_gpx_time - current_video_time
         self.update_status(f"设置偏移: {self.gpx_offset:+.2f}s")
-        if not self.playing and self.cap is not None:
+        if self.cap is not None:
+            # 强制刷新当前帧叠加层（无论是否在播放）
             self.seek_to_frame(self.current_frame_pos)
     
     def create_timeline(self):
@@ -706,19 +700,8 @@ class VideoEditorApp:
             
             # 初始化时间轴
             self.timeline_fit()
-            
-            # 优先检查GoPro GPS数据 (GPMD)
-            # 如果存在GPMD流，直接使用它，不再尝试加载外部GPX文件
-            # 这样可以保证最佳的时间同步
-            gpmd_info = self.get_gpmd_stream_index(video_path)
-            
-            if gpmd_info is not None:
-                self.update_status("检测到GoPro GPS数据，正在自动导入...")
-                # 自动导入，不询问用户
-                self.import_gopro_gps(auto=True)
-            else:
-                # 否则尝试加载外部GPX文件
-                self.load_gpx_data(video_path)
+            # 加载外部GPX文件（不再从视频中提取GPMD）
+            self.load_gpx_data(video_path)
             
         except Exception as e:
             messagebox.showerror("错误", f"加载视频失败:\n{str(e)}")
@@ -740,133 +723,23 @@ class VideoEditorApp:
             except ValueError:
                 messagebox.showerror("错误", "无效的数字格式")
 
-    def import_gopro_gps(self, auto=False):
-        """导入GoPro GPS数据
-        :param auto: 是否为自动导入（不显示成功弹窗）
-        """
-        if not self.video_path:
-            messagebox.showinfo("提示", "请先打开一个视频文件")
-            return
-            
-        stream_info = self.get_gpmd_stream_index(self.video_path)
-        if stream_info is None:
-            messagebox.showinfo("提示", "未在视频中找到GoPro GPS数据 (GPMD流)")
-            return
-            
-        stream_index, start_time = stream_info
-            
-        self.update_status("正在提取GoPro GPS数据...")
-        
-        def _process():
-            try:
-                raw_data = self.extract_gpmd_data(self.video_path, stream_index)
-                if not raw_data:
-                    self.root.after(0, lambda: messagebox.showerror("错误", "提取数据失败"))
-                    return
-                    
-                points = self.parse_gpmd_structure(raw_data)
-                
-                if not points:
-                    self.root.after(0, lambda: messagebox.showinfo("提示", "未解析到有效的GPS点"))
-                    return
-                
-                # Normalize time_offset by subtracting stream start time if available
-                # This handles cases where pts_time is absolute or offset by start_time
-                if start_time is not None and start_time > 0:
-                    for p in points:
-                        p['time_offset'] -= start_time
-                
-                # Assign timestamps based on GPMD timing
-                # Use the time_offset (derived from pts_time) to set the datetime
-                if self.video_creation_time:
-                    for p in points:
-                        # Ensure time_offset is non-negative for datetime calculation?
-                        # Actually if pts < start_time, it might be negative.
-                        # But usually pts >= start_time.
-                        offset = max(0, p['time_offset'])
-                        p['time'] = self.video_creation_time + timedelta(seconds=offset)
-                else:
-                    # Fallback if no video creation time
-                    for p in points:
-                        p['time'] = datetime.utcfromtimestamp(max(0, p['time_offset']))
-                
-                # Update data
-                self.gpx_data = points
-                self.gpx_start_time = points[0]['time']
-                self.gpx_end_time = points[-1]['time']
-                self.gpx_offset = 0.0 # Perfectly synced by definition
-                
-                # Recalculate speeds
-                self._calculate_speeds_from_points(points)
-                
-                # Update UI
-                self.root.after(0, lambda: self.update_status(f"已导入GoPro GPS数据 ({len(points)}点)"))
-                self.root.after(0, self.draw_track_thumbnail)
-                
-                if not auto:
-                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功导入 {len(points)} 个GPS点\n已自动同步"))
-                
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("错误", f"解析失败: {str(e)}"))
+    # 已移除：从视频中提取GPMD的逻辑
 
-        threading.Thread(target=_process).start()
-
-    def check_and_import_gopro_gps(self):
-        """检查并导入GoPro GPS数据（手动菜单调用）"""
-        stream_info = self.get_gpmd_stream_index(self.video_path)
-        if stream_info is not None:
-            if messagebox.askyesno("GoPro GPS", "检测到视频包含GoPro GPS数据，是否导入？\n(这将覆盖当前的GPX数据)"):
-                self.import_gopro_gps()
-        else:
-            messagebox.showinfo("提示", "未检测到GoPro GPS数据流")
-
-    def _calculate_speeds_from_points(self, points):
-        """Recalculate speeds and distances for internal point structure"""
-        if not points or len(points) < 2:
-            return
-
-        for i in range(len(points) - 1):
-            p1 = points[i]
-            p2 = points[i+1]
-            
-            # Calculate distance
-            dist = self._haversine_distance(p1['lat'], p1['lon'], p2['lat'], p2['lon'])
-            
-            # Calculate time diff
-            t1 = p1['time']
-            t2 = p2['time']
-            dt = (t2 - t1).total_seconds()
-            
-            speed = 0.0
-            if dt > 0:
-                speed = (dist / 1000.0) / (dt / 3600.0) # km/h
-                
-            p1['speed'] = speed
-            p1['dist_to_next'] = dist
-            
-        # Last point speed same as previous
-        points[-1]['speed'] = points[-2]['speed']
-        points[-1]['dist_to_next'] = 0.0
+    # 已移除：_calculate_speeds_from_points（仅用于 GPMD 列表数据）
 
     def draw_track_thumbnail(self):
         """Draw track thumbnail for internal points"""
         if not hasattr(self, 'gpx_data') or not self.gpx_data:
             return
             
-        # Extract lat/lon list
+        # Extract lat/lon list from segments
         points = []
-        if isinstance(self.gpx_data, list):
-            # Internal point structure
-            points = [(p['lat'], p['lon']) for p in self.gpx_data]
-        elif isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data:
-            # Old segment structure
-            seg_points = []
+        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data:
             for s in self.gpx_data['segments']:
-                seg_points.append((s['lat_start'], s['lon_start']))
+                points.append((s['lat_start'], s['lon_start']))
             if self.gpx_data['segments']:
-                 last = self.gpx_data['segments'][-1]
-                 seg_points.append((last['lat_end'], last['lon_end']))
-            points = seg_points
+                last = self.gpx_data['segments'][-1]
+                points.append((last['lat_end'], last['lon_end']))
             
         if not points:
             return
@@ -922,171 +795,7 @@ class VideoEditorApp:
             # Format: (min_lat, min_lon, scale, h, padding, lon_correction=1.0)
             self.track_transform = (min_lat, min_lon, scale, h, padding, 1.0)
         
-    def get_gpmd_stream_index(self, video_path):
-        """获取GoPro GPMD流索引
-        :return: (index, start_time) or None
-        """
-        ffprobe_cmd = self._get_ffprobe_cmd()
-        if not ffprobe_cmd:
-            return None
-
-        try:
-            cmd = ffprobe_cmd + [
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_streams',
-                video_path
-            ]
-            
-            startupinfo = None
-            if platform.system() == 'Windows':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
-            output = subprocess.check_output(cmd, startupinfo=startupinfo).decode('utf-8')
-            data = json.loads(output)
-            
-            for stream in data.get('streams', []):
-                is_gpmd = False
-                tags = stream.get('tags', {}) or {}
-                codec_tag_string = (stream.get('codec_tag_string') or '').lower()
-                codec_type = (stream.get('codec_type') or '').lower()
-                codec_name = (stream.get('codec_name') or '').lower()
-                handler_name = (tags.get('handler_name') or '').lower()
-                data_type = (tags.get('data_type') or '').lower()
-                if codec_tag_string == 'gpmd':
-                    is_gpmd = True
-                if 'gpmd' in data_type:
-                    is_gpmd = True
-                if codec_type == 'data' and 'gopro' in handler_name and ('met' in handler_name or 'metadata' in handler_name):
-                    is_gpmd = True
-                if codec_type == 'data' and codec_name in ('bin_data', 'unknown') and (codec_tag_string in ('gpmd', '0x646d7067')):
-                    is_gpmd = True
-                if is_gpmd:
-                    index = stream['index']
-                    start_time = None
-                    if 'start_time' in stream:
-                        try:
-                            start_time = float(stream['start_time'])
-                        except:
-                            pass
-                    return index, start_time
-                    
-        except Exception as e:
-            print(f"查找GPMD流失败: {e}")
-        return None
-
-    def extract_gpmd_data(self, video_path, stream_index):
-        """提取GPMD数据包"""
-        ffprobe_cmd = self._get_ffprobe_cmd()
-        if not ffprobe_cmd:
-            return None
-
-        try:
-            # 使用 ffprobe 获取包含数据的包信息
-            cmd = ffprobe_cmd + [
-                '-v', 'quiet',
-                '-select_streams', str(stream_index),
-                '-show_packets',
-                '-show_data',
-                '-print_format', 'json',
-                video_path
-            ]
-            
-            startupinfo = None
-            if platform.system() == 'Windows':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
-            # 注意：对于大文件，这可能会产生大量输出
-            # 我们可能需要限制读取量，或者分块读取
-            popen_kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if platform.system() == 'Windows':
-                process = subprocess.Popen(cmd, startupinfo=startupinfo, **popen_kwargs)
-            else:
-                process = subprocess.Popen(cmd, start_new_session=True, **popen_kwargs)
-            stdout, stderr = process.communicate()
-            
-            if process.returncode != 0:
-                print(f"提取GPMD数据失败: {stderr}")
-                return None
-                
-            return json.loads(stdout.decode('utf-8'))
-        except Exception as e:
-            print(f"提取GPMD数据异常: {e}")
-            return None
-
-    def parse_gpmd_structure(self, packet_data):
-        """解析GPMD数据结构"""
-        if not packet_data or 'packets' not in packet_data:
-            return []
-            
-        points = []
-        
-        for packet in packet_data['packets']:
-            if 'data' not in packet or 'pts_time' not in packet:
-                continue
-                
-            pts_time = float(packet['pts_time'])
-            hex_data = packet['data'].strip()
-            
-            try:
-                # 将 hex 转换为 bytes
-                data = bytes.fromhex(hex_data)
-            except:
-                continue
-                
-            # 解析 payload
-            offset = 0
-            length = len(data)
-            
-            while offset < length - 8:
-                try:
-                    # 检查是否是 GPS5
-                    if data[offset:offset+4] == b'GPS5':
-                        count = struct.unpack('>H', data[offset+6:offset+8])[0]
-                        data_start = offset + 8
-                        
-                        # GPS5 包含 5 个 int32: lat, lon, alt, speed2d, speed3d
-                        num_samples = count // 5
-                        if num_samples > 0:
-                            fmt = f'>{count}i'
-                            try:
-                                values = struct.unpack(fmt, data[data_start:data_start + count*4])
-                                
-                                for i in range(num_samples):
-                                    idx = i * 5
-                                    lat = values[idx] / 10000000.0
-                                    lon = values[idx+1] / 10000000.0
-                                    alt = values[idx+2] / 1000.0
-                                    # speed3d = values[idx+4] / 1000.0 
-                                    
-                                    # 计算该点的时间
-                                    # 假设 18Hz 采样率 (GoPro 标准)
-                                    point_time = pts_time + i * (1.0/18.0)
-                                    
-                                    points.append({
-                                        'lat': lat,
-                                        'lon': lon,
-                                        'ele': alt,
-                                        'speed': 0, # 将由 _calculate_speeds_from_points 计算
-                                        'time': datetime.utcfromtimestamp(point_time),
-                                        'time_offset': point_time
-                                    })
-                            except struct.error:
-                                pass
-                                
-                        # 跳过已处理的块 (4字节对齐)
-                        block_size = 8 + count * 4
-                        if block_size % 4 != 0:
-                            block_size += (4 - (block_size % 4))
-                        offset += block_size
-                    else:
-                        offset += 4
-                except Exception:
-                    offset += 1
-                    
-        return points
+    # 已移除：GPMD 流索引与解析函数（get_gpmd_stream_index / extract_gpmd_data / parse_gpmd_structure）
 
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate haversine distance between two points in meters"""
@@ -1598,61 +1307,8 @@ class VideoEditorApp:
             self.debug_info = {'status': 'No Data'}
             return 0.0, 0, None, None
             
-        # 1. 处理 GPMD 格式 (列表)
-        if isinstance(self.gpx_data, list):
-            points = self.gpx_data
-            if not points:
-                return 0.0, 0, None, None
-                
-            target_time = current_seconds + self.gpx_offset
-            
-            # 手动二分查找 (points sorted by time_offset)
-            low = 0
-            high = len(points) - 1
-            
-            # 边界检查
-            if target_time < points[0]['time_offset']:
-                p = points[0]
-                return p['speed'], 0, p['lat'], p['lon']
-            if target_time > points[-1]['time_offset']:
-                p = points[-1]
-                return p['speed'], 0, p['lat'], p['lon']
-            
-            while low <= high:
-                mid = (low + high) // 2
-                p = points[mid]
-                p_time = p['time_offset']
-                
-                if p_time <= target_time:
-                    if mid == len(points) - 1 or points[mid+1]['time_offset'] > target_time:
-                        # Found the interval [mid, mid+1]
-                        # Interpolate
-                        p1 = points[mid]
-                        if mid == len(points) - 1:
-                            return p1['speed'], 0, p1['lat'], p1['lon']
-                            
-                        p2 = points[mid+1]
-                        t1 = p1['time_offset']
-                        t2 = p2['time_offset']
-                        
-                        ratio = 0.0
-                        if t2 > t1:
-                            ratio = (target_time - t1) / (t2 - t1)
-                            
-                        lat = p1['lat'] + (p2['lat'] - p1['lat']) * ratio
-                        lon = p1['lon'] + (p2['lon'] - p1['lon']) * ratio
-                        speed = p1['speed'] + (p2['speed'] - p1['speed']) * ratio
-                        
-                        return speed, 0, lat, lon
-                    else:
-                        low = mid + 1
-                else:
-                    high = mid - 1
-            
-            return 0.0, 0, None, None
-
-        # 2. 处理 GPX 格式 (字典)
-        elif isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data:
+        # 仅处理 GPX 段结构
+        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data:
             segments = self.gpx_data['segments']
             if not segments:
                 return 0.0, 0, None, None
