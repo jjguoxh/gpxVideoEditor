@@ -6,7 +6,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import threading
 import time
@@ -21,6 +21,7 @@ import struct
 import tempfile
 import json
 import re
+import signal
 
 # 尝试导入numpy用于错误处理
 try:
@@ -124,6 +125,9 @@ class VideoEditorApp:
         # 1. 检查系统PATH
         if shutil.which('ffprobe'):
             return ['ffprobe']
+        env_ffprobe = os.environ.get('FFPROBE')
+        if env_ffprobe and os.path.exists(env_ffprobe):
+            return [env_ffprobe]
             
         # 2. 检查当前目录
         if os.path.exists('ffprobe.exe'):
@@ -137,6 +141,13 @@ class VideoEditorApp:
             os.path.join('ffmpeg', 'bin', 'ffprobe.exe'),
             os.path.join('bin', 'ffprobe.exe'),
             os.path.join('tools', 'ffprobe.exe'),
+            os.path.join('ffmpeg', 'bin', 'ffprobe'),
+            os.path.join('bin', 'ffprobe'),
+            os.path.join('tools', 'ffprobe'),
+            '/usr/local/bin/ffprobe',
+            '/opt/homebrew/bin/ffprobe',
+            '/usr/bin/ffprobe',
+            '/opt/local/bin/ffprobe',
         ]
         
         for p in common_paths:
@@ -286,84 +297,54 @@ class VideoEditorApp:
         """创建主面板（预览窗口和控制面板）"""
         main_container = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # 左侧：视频预览区域
-        preview_frame = ttk.LabelFrame(main_container, text="视频预览", padding=10)
-        main_container.add(preview_frame, weight=2)
-        
-        # 视频显示区域
-        self.video_canvas = tk.Canvas(preview_frame, bg="#000000", width=640, height=360,
-                                      highlightthickness=0, bd=0)
+        left_container = ttk.Frame(main_container)
+        main_container.add(left_container, weight=2)
+        self.preview_notebook = ttk.Notebook(left_container)
+        self.preview_notebook.pack(fill=tk.BOTH, expand=True)
+        video_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(video_tab, text="视频")
+        self.align_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.align_tab, text="轨迹对齐")
+        self.video_canvas = tk.Canvas(video_tab, bg="#000000", width=640, height=360, highlightthickness=0, bd=0)
         self.video_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # 预览信息标签
-        self.preview_label = ttk.Label(preview_frame, text="📹 未加载视频\n\n点击 文件 -> 打开视频 来加载视频文件", 
-                                       font=default_font, foreground="gray", justify=tk.CENTER)
+        self.preview_label = ttk.Label(video_tab, text="📹 未加载视频\n\n点击 文件 -> 打开视频 来加载视频文件", font=default_font, foreground="gray", justify=tk.CENTER)
         self.preview_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
-        
-        # 播放控制面板
-        control_frame = ttk.Frame(preview_frame)
+        control_frame = ttk.Frame(video_tab)
         control_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # 播放进度条
         self.progress_var = tk.DoubleVar()
-        self.progress_scale = ttk.Scale(control_frame, from_=0, to=100, 
-                                        variable=self.progress_var, orient=tk.HORIZONTAL,
-                                        command=self.on_progress_change)
+        self.progress_scale = ttk.Scale(control_frame, from_=0, to=100, variable=self.progress_var, orient=tk.HORIZONTAL, command=self.on_progress_change)
         self.progress_scale.pack(fill=tk.X, padx=5, pady=2)
-        
-        # 绑定鼠标事件以支持拖拽跳转
         self.progress_scale.bind("<ButtonPress-1>", self.on_progress_press)
         self.progress_scale.bind("<ButtonRelease-1>", self.on_progress_release)
-        
-        # 时间显示和播放控制
         time_frame = ttk.Frame(control_frame)
         time_frame.pack(fill=tk.X, padx=5)
-        
         self.time_label = ttk.Label(time_frame, text="00:00:00 / 00:00:00", font=default_font)
         self.time_label.pack(side=tk.LEFT)
-        
-        # 播放控制按钮组
         control_buttons_frame = ttk.Frame(time_frame)
         control_buttons_frame.pack(side=tk.LEFT, padx=20)
-        
-        # 播放控制按钮
         ttk.Button(control_buttons_frame, text="⏮", command=self.jump_to_start, width=3).pack(side=tk.LEFT, padx=1)
         ttk.Button(control_buttons_frame, text="⏪", command=self.rewind_5s, width=3).pack(side=tk.LEFT, padx=1)
         self.play_btn = ttk.Button(control_buttons_frame, text="▶", command=self.toggle_play, width=3)
         self.play_btn.pack(side=tk.LEFT, padx=1)
         ttk.Button(control_buttons_frame, text="⏩", command=self.forward_5s, width=3).pack(side=tk.LEFT, padx=1)
         ttk.Button(control_buttons_frame, text="⏭", command=self.jump_to_end, width=3).pack(side=tk.LEFT, padx=1)
-        
-        # 音量控制
         volume_frame = ttk.Frame(time_frame)
         volume_frame.pack(side=tk.RIGHT, padx=5)
-        
         self.mute_btn = ttk.Button(volume_frame, text="🔊", command=self.toggle_mute, width=3)
         self.mute_btn.pack(side=tk.LEFT, padx=1)
-        
-        self.volume_scale = ttk.Scale(volume_frame, from_=0, to=100, orient=tk.HORIZONTAL,
-                                     command=self.on_volume_change, length=80)
+        self.volume_scale = ttk.Scale(volume_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.on_volume_change, length=80)
         self.volume_scale.set(100)
         self.volume_scale.pack(side=tk.LEFT, padx=2)
-        
-        # 播放速度控制
         speed_frame = ttk.Frame(time_frame)
         speed_frame.pack(side=tk.RIGHT, padx=10)
-        
         ttk.Label(speed_frame, text="速度:", font=default_font).pack(side=tk.LEFT, padx=2)
         self.speed_var = tk.StringVar(value="1.0x")
-        speed_combo = ttk.Combobox(speed_frame, textvariable=self.speed_var, width=6,
-                                   values=["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
-                                   state="readonly")
+        speed_combo = ttk.Combobox(speed_frame, textvariable=self.speed_var, width=6, values=["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"], state="readonly")
         speed_combo.pack(side=tk.LEFT, padx=2)
         speed_combo.bind('<<ComboboxSelected>>', self.on_speed_change)
-        
-        # 右侧：属性面板
+        self.init_align_tab(self.align_tab)
         property_frame = ttk.LabelFrame(main_container, text="属性", padding=10, width=250)
         main_container.add(property_frame, weight=1)
-        
-        # 创建属性面板内容
         self.create_property_panel(property_frame)
     
     def create_property_panel(self, parent):
@@ -411,6 +392,149 @@ class VideoEditorApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.clip_tree.bind('<Double-1>', self.on_clip_select)
+    
+    def init_align_tab(self, parent):
+        self.align_canvas = tk.Canvas(parent, bg="#1E1E1E", height=420, highlightthickness=0, bd=0)
+        self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        bottom = ttk.Frame(parent)
+        bottom.pack(fill=tk.X, padx=6, pady=6)
+        self.align_reverse_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bottom, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.RIGHT, padx=6)
+        self.align_progress_var = tk.DoubleVar(value=0.0)
+        self.align_scale = ttk.Scale(bottom, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
+        self.align_scale.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=6)
+        self.align_time_label = ttk.Label(bottom, text="GPX时间: 0.0s")
+        self.align_time_label.pack(side=tk.LEFT, padx=8)
+        self.align_confirm_btn = ttk.Button(bottom, text="确认对齐", command=self.align_confirm)
+        self.align_confirm_btn.pack(side=tk.RIGHT, padx=6)
+        self.align_canvas.bind("<Configure>", lambda e: self.update_align_canvas())
+        self.align_track_points = None
+        self.align_transform = None
+    
+    def get_gpx_duration(self):
+        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']:
+            return float(self.gpx_data['segments'][-1]['end'])
+        if isinstance(self.gpx_data, list) and len(self.gpx_data) > 0 and 'time_offset' in self.gpx_data[-1]:
+            return float(self.gpx_data[-1]['time_offset'])
+        return 0.0
+    
+    def _get_latlon_at_gpx_time(self, t):
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
+            return None, None
+        segs = self.gpx_data['segments']
+        if not segs:
+            return None, None
+        if t <= segs[0]['start']:
+            return segs[0]['lat_start'], segs[0]['lon_start']
+        if t >= segs[-1]['end']:
+            return segs[-1]['lat_end'], segs[-1]['lon_end']
+        low, high = 0, len(segs) - 1
+        while low <= high:
+            mid = (low + high) // 2
+            s = segs[mid]
+            if s['start'] <= t <= s['end']:
+                ratio = 0.0
+                span = s['end'] - s['start']
+                if span > 0:
+                    ratio = (t - s['start']) / span
+                lat = s['lat_start'] + (s['lat_end'] - s['lat_start']) * ratio
+                lon = s['lon_start'] + (s['lon_end'] - s['lon_start']) * ratio
+                return lat, lon
+            if t > s['end']:
+                low = mid + 1
+            else:
+                high = mid - 1
+        return None, None
+    
+    def update_align_controls(self):
+        has_data = False
+        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']:
+            has_data = True
+        elif isinstance(self.gpx_data, list) and len(self.gpx_data) > 0:
+            has_data = True
+        if not has_data:
+            self.align_scale.config(from_=0.0, to=0.0)
+            self.align_progress_var.set(0.0)
+            self.align_time_label.config(text="GPX时间: 0.0s")
+            self.update_align_canvas()
+            return
+        duration = max(0.0, self.get_gpx_duration())
+        self.align_scale.config(from_=0.0, to=duration)
+        self.align_progress_var.set(0.0)
+        self.align_time_label.config(text=f"GPX时间: 0.0s")
+        self.update_align_canvas()
+    
+    def update_align_canvas(self):
+        if not hasattr(self, 'align_canvas'):
+            return
+        self.align_canvas.delete("all")
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
+            w = self.align_canvas.winfo_width()
+            h = self.align_canvas.winfo_height()
+            if w > 0 and h > 0:
+                self.align_canvas.create_text(w//2, h//2, text="未加载GPX", fill="#999999")
+            return
+        pts = []
+        for s in self.gpx_data['segments']:
+            pts.append((s['lat_start'], s['lon_start']))
+        last = self.gpx_data['segments'][-1]
+        pts.append((last['lat_end'], last['lon_end']))
+        lats = [p[0] for p in pts]
+        lons = [p[1] for p in pts]
+        min_lat, max_lat = min(lats), max(lats)
+        min_lon, max_lon = min(lons), max(lons)
+        w = max(1, self.align_canvas.winfo_width())
+        h = max(1, self.align_canvas.winfo_height())
+        padding = 20
+        mid_lat = math.radians((min_lat + max_lat) / 2) if max_lat != min_lat else 0.0
+        lon_corr = math.cos(mid_lat) if max_lat != min_lat else 1.0
+        lat_range = max(1e-9, max_lat - min_lat)
+        lon_range = max(1e-9, (max_lon - min_lon) * lon_corr)
+        scale_x = (w - 2 * padding) / lon_range
+        scale_y = (h - 2 * padding) / lat_range
+        scale = min(scale_x, scale_y)
+        def tf(lat, lon):
+            x = padding + (lon - min_lon) * lon_corr * scale
+            y = h - padding - (lat - min_lat) * scale
+            return x, y
+        screen = [tf(lat, lon) for lat, lon in pts]
+        for i in range(len(screen) - 1):
+            x1, y1 = screen[i]
+            x2, y2 = screen[i+1]
+            self.align_canvas.create_line(x1, y1, x2, y2, fill="#00FF00", width=2)
+        t = self.align_progress_var.get()
+        duration = self.get_gpx_duration()
+        eff_t = duration - t if self.align_reverse_var.get() else t
+        lat, lon = self._get_latlon_at_gpx_time(eff_t)
+        if lat is not None and lon is not None:
+            x, y = tf(lat, lon)
+            r = 5
+            self.align_canvas.create_oval(x-r, y-r, x+r, y+r, fill="#00BFFF", outline="")
+        self.align_transform = (min_lat, min_lon, scale, h, padding, lon_corr)
+        self.align_track_points = pts
+    
+    def on_align_progress_change(self, value):
+        try:
+            v = float(value)
+        except:
+            v = 0.0
+        duration = self.get_gpx_duration()
+        eff_v = duration - v if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get() else v
+        self.align_time_label.config(text=f"GPX时间: {eff_v:.1f}s")
+        self.update_align_canvas()
+    
+    def align_confirm(self):
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
+            messagebox.showwarning("提示", "未加载GPX数据")
+            return
+        current_video_time = self._current_time()
+        raw_gpx_time = self.align_progress_var.get()
+        duration = self.get_gpx_duration()
+        selected_gpx_time = duration - raw_gpx_time if self.align_reverse_var.get() else raw_gpx_time
+        self.gpx_offset = selected_gpx_time - current_video_time
+        self.update_status(f"设置偏移: {self.gpx_offset:+.2f}s")
+        if not self.playing and self.cap is not None:
+            self.seek_to_frame(self.current_frame_pos)
     
     def create_timeline(self):
         """创建时间轴"""
@@ -823,15 +947,21 @@ class VideoEditorApp:
             data = json.loads(output)
             
             for stream in data.get('streams', []):
-                # 检查 codec_tag_string 或 handler_name
                 is_gpmd = False
-                if stream.get('codec_tag_string') == 'gpmd':
+                tags = stream.get('tags', {}) or {}
+                codec_tag_string = (stream.get('codec_tag_string') or '').lower()
+                codec_type = (stream.get('codec_type') or '').lower()
+                codec_name = (stream.get('codec_name') or '').lower()
+                handler_name = (tags.get('handler_name') or '').lower()
+                data_type = (tags.get('data_type') or '').lower()
+                if codec_tag_string == 'gpmd':
                     is_gpmd = True
-                
-                tags = stream.get('tags', {})
-                if 'GoPro MET' in tags.get('handler_name', ''):
+                if 'gpmd' in data_type:
                     is_gpmd = True
-                
+                if codec_type == 'data' and 'gopro' in handler_name and ('met' in handler_name or 'metadata' in handler_name):
+                    is_gpmd = True
+                if codec_type == 'data' and codec_name in ('bin_data', 'unknown') and (codec_tag_string in ('gpmd', '0x646d7067')):
+                    is_gpmd = True
                 if is_gpmd:
                     index = stream['index']
                     start_time = None
@@ -870,7 +1000,11 @@ class VideoEditorApp:
                 
             # 注意：对于大文件，这可能会产生大量输出
             # 我们可能需要限制读取量，或者分块读取
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+            popen_kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if platform.system() == 'Windows':
+                process = subprocess.Popen(cmd, startupinfo=startupinfo, **popen_kwargs)
+            else:
+                process = subprocess.Popen(cmd, start_new_session=True, **popen_kwargs)
             stdout, stderr = process.communicate()
             
             if process.returncode != 0:
@@ -1070,6 +1204,9 @@ class VideoEditorApp:
                         'lon_end': points[i+1][1]
                     })
             
+            # 保险起见，按时间排序
+            segments.sort(key=lambda s: (s['start'], s['end']))
+            
             self.gpx_data = {'segments': segments, 'name': name, 'start_time': gpx_start_time}
             
             # 生成全量轨迹缩略图 (始终显示完整轨迹)
@@ -1087,6 +1224,10 @@ class VideoEditorApp:
             # 如果暂停状态，刷新当前帧以显示叠加层
             if not self.playing and self.cap:
                 self.seek_to_frame(self.current_frame_pos)
+            
+            # 更新对齐页控件
+            if hasattr(self, 'update_align_controls'):
+                self.update_align_controls()
             
         except Exception as e:
             print(f"GPX加载失败: {e}")
@@ -1126,6 +1267,7 @@ class VideoEditorApp:
                     time_obj = self._parse_time(time_str)
                 
                 hr = 0
+                spd_kph = None
                 # 尝试获取心率
                 extensions = trkpt.getElementsByTagName('extensions')
                 if extensions:
@@ -1135,8 +1277,19 @@ class VideoEditorApp:
                         if hr_nodes and hr_nodes[0].firstChild:
                             hr = int(hr_nodes[0].firstChild.data)
                             break
+                    # 尝试速度 (单位多为 m/s)
+                    for tag in ['gpxtpx:speed', 'ns3:speed', 'speed']:
+                        sp_nodes = extensions[0].getElementsByTagName(tag)
+                        if sp_nodes and sp_nodes[0].firstChild:
+                            try:
+                                sp_mps = float(sp_nodes[0].firstChild.data)
+                                spd_kph = sp_mps * 3.6
+                            except:
+                                pass
+                            break
                 
-                points.append((lat, lon, ele, time_obj, hr))
+                # points: (lat, lon, ele, time, hr, opt_speed_kph)
+                points.append((lat, lon, ele, time_obj, hr, spd_kph))
             
             if not points:
                 return None, None, None
@@ -1185,7 +1338,10 @@ class VideoEditorApp:
         return dt
 
     def _calculate_speeds(self, points):
-        """计算两点之间的速度 (km/h)"""
+        """计算两点之间的速度 (km/h)
+        优先使用 GPX 扩展中提供的速度(若存在，取相邻两点速度的平均值)，否则回退为距离/时间计算
+        并做轻度平滑
+        """
         speeds = []
         # 简单计算每两点间的速度
         raw_speeds = []
@@ -1193,18 +1349,24 @@ class VideoEditorApp:
             p1 = points[i]
             p2 = points[i+1]
             
-            dist = self._haversine_distance(p1[0], p1[1], p2[0], p2[1])
-            time_diff = (p2[3] - p1[3]).total_seconds()
-            
-            if time_diff > 0:
-                speed_kph = (dist / time_diff) * 3.6
+            # 优先使用扩展速度
+            s1 = p1[5] if len(p1) > 5 else None
+            s2 = p2[5] if len(p2) > 5 else None
+            if s1 is not None and s2 is not None and s1 > 0 and s2 > 0:
+                speed_kph = (s1 + s2) / 2.0
             else:
-                speed_kph = 0
+                dist = self._haversine_distance(p1[0], p1[1], p2[0], p2[1])
+                time_diff = (p2[3] - p1[3]).total_seconds()
+                if time_diff > 0:
+                    speed_kph = (dist / time_diff) * 3.6
+                else:
+                    speed_kph = 0
             raw_speeds.append(speed_kph)
         
         # 平滑处理 (移动平均)
         if len(raw_speeds) > 0:
-            window_size = 5
+            # 使用更小的窗口，保留加速/下坡峰值
+            window_size = 3
             for i in range(len(raw_speeds)):
                 start = max(0, i - window_size // 2)
                 end = min(len(raw_speeds), i + window_size // 2 + 1)
@@ -1857,6 +2019,7 @@ class VideoEditorApp:
         if start_time is None:
             start_time = self._current_time()
         try:
+            self.stop_audio_playback()
             vol = max(0, min(100, int(self.volume * 100)))
             spd = self.playback_speed
             if spd < 0.5:
@@ -1873,14 +2036,36 @@ class VideoEditorApp:
                 '-volume', str(vol),
                 '-af', f'atempo={spd}'
             ]
-            self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if platform.system() == 'Windows':
+                creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+                self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+            else:
+                self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except Exception:
             self.audio_proc = None
     
     def stop_audio_playback(self):
         if self.audio_proc is not None:
             try:
-                self.audio_proc.terminate()
+                if platform.system() == 'Windows':
+                    self.audio_proc.terminate()
+                else:
+                    try:
+                        os.killpg(self.audio_proc.pid, signal.SIGTERM)
+                    except Exception:
+                        self.audio_proc.terminate()
+                try:
+                    self.audio_proc.wait(timeout=0.5)
+                except Exception:
+                    pass
+                if self.audio_proc.poll() is None:
+                    if platform.system() != 'Windows':
+                        try:
+                            os.killpg(self.audio_proc.pid, signal.SIGKILL)
+                        except Exception:
+                            self.audio_proc.kill()
+                    else:
+                        self.audio_proc.kill()
             except Exception:
                 pass
             self.audio_proc = None
