@@ -484,8 +484,23 @@ class VideoEditorApp:
             return
         duration = max(0.0, self.get_gpx_duration())
         self.align_scale.config(from_=0.0, to=duration)
-        self.align_progress_var.set(0.0)
-        self.align_time_label.config(text=f"GPX时间: 0.0s")
+        
+        # 使用当前视频时间对应的GPX时间来初始化控件
+        current_video_time = self._current_time()
+        gpx_offset = getattr(self, 'gpx_offset', 0.0)
+        
+        # 计算当前视频时刻应该对应的GPX时刻
+        estimated_gpx_time = current_video_time + gpx_offset
+        
+        # 考虑倒放选项（虽然加载时通常未勾选，但为了严谨）
+        if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get():
+             estimated_gpx_time = duration - estimated_gpx_time
+             
+        # 限制在范围内
+        estimated_gpx_time = max(0.0, min(duration, estimated_gpx_time))
+        
+        self.align_progress_var.set(estimated_gpx_time)
+        self.align_time_label.config(text=f"GPX时间: {estimated_gpx_time:.1f}s")
         self.update_align_canvas()
     
     def reset_align_view(self):
@@ -731,22 +746,64 @@ class VideoEditorApp:
         if file_path:
             self.load_video(file_path)
     
-    def _parse_iso8601(self, time_str):
-        """解析ISO8601时间字符串"""
+    def _parse_to_utc_datetime(self, time_str):
+        """解析时间字符串，统一返回带时区的 UTC datetime"""
+        if not time_str:
+            return None
+            
         try:
-            # 处理 '2023-10-01T12:00:00.000000Z'
+            # 1. 处理 Z 后缀 (替换为 +00:00 以兼容 fromisoformat)
             if time_str.endswith('Z'):
-                time_str = time_str[:-1]
-            # 处理可能的毫秒
-            if '.' in time_str:
-                # 截断到6位微秒，因为Python只支持6位
-                main, frac = time_str.split('.')
-                frac = frac[:6]
-                time_str = f"{main}.{frac}"
-            return datetime.fromisoformat(time_str)
+                time_str = time_str[:-1] + '+00:00'
+                
+            # 2. 尝试使用 fromisoformat (支持 +HH:MM)
+            try:
+                dt = datetime.fromisoformat(time_str)
+            except ValueError:
+                # 尝试处理毫秒过长的情况 (Python只支持6位)
+                if '.' in time_str:
+                    main_part, rest = time_str.split('.', 1)
+                    # 查找时区部分
+                    tz_part = ''
+                    if '+' in rest:
+                        frac, tz_part = rest.split('+', 1)
+                        tz_part = '+' + tz_part
+                    elif '-' in rest:
+                        frac, tz_part = rest.split('-', 1)
+                        tz_part = '-' + tz_part
+                    else:
+                        frac = rest
+                    
+                    # 截断毫秒到6位
+                    if len(frac) > 6:
+                        frac = frac[:6]
+                    
+                    dt = datetime.fromisoformat(f"{main_part}.{frac}{tz_part}")
+                else:
+                    # 最后的尝试: 常见格式
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S']:
+                        try:
+                            dt = datetime.strptime(time_str, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if 'dt' not in locals():
+                        raise ValueError(f"Unknown format: {time_str}")
+
+            # 3. 确保有时区信息 (如果没有，默认为 UTC)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            # 4. 转换为 UTC
+            return dt.astimezone(timezone.utc)
+            
         except Exception as e:
             print(f"时间解析错误: {time_str}, {e}")
             return None
+
+    def _parse_iso8601(self, time_str):
+        """解析ISO8601时间字符串 (兼容旧接口，现代理到 _parse_to_utc_datetime)"""
+        return self._parse_to_utc_datetime(time_str)
 
     def load_video(self, video_path):
         """加载视频"""
@@ -1092,7 +1149,7 @@ class VideoEditorApp:
                 time_nodes = trkpt.getElementsByTagName('time')
                 if time_nodes and time_nodes[0].firstChild:
                     time_str = time_nodes[0].firstChild.data
-                    time_obj = self._parse_time(time_str)
+                    time_obj = self._parse_to_utc_datetime(time_str)
                 
                 hr = 0
                 spd_kph = None
@@ -1135,35 +1192,6 @@ class VideoEditorApp:
             print(f"解析GPX出错: {e}")
             return None, None, None
 
-    def _parse_time(self, t_str):
-        """解析时间字符串，统一返回 UTC datetime"""
-        if not t_str: return None
-        
-        # 统一处理 Z 和 T
-        t_str = t_str.replace('Z', '').replace('T', ' ')
-        
-        # 处理时区偏移 (简单去掉 +08:00 等，假定为 UTC)
-        if '+' in t_str:
-            t_str = t_str.split('+')[0]
-        
-        dt = None
-        try:
-            if '.' in t_str:
-                main_part, frac_part = t_str.split('.')
-                if len(frac_part) > 6:
-                    frac_part = frac_part[:6]
-                t_str = f"{main_part}.{frac_part}"
-                dt = datetime.strptime(t_str, '%Y-%m-%d %H:%M:%S.%f')
-            else:
-                dt = datetime.strptime(t_str, '%Y-%m-%d %H:%M:%S')
-        except:
-            try:
-                 dt = datetime.strptime(t_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
-            except:
-                return None
-        
-        # 假定解析出来的是 UTC 时间 (naive)
-        return dt
 
     def _calculate_speeds(self, points):
         """计算两点之间的速度 (km/h)
@@ -1265,9 +1293,8 @@ class VideoEditorApp:
             try:
                 # 优先使用修改时间 (mtime)，因为它在复制时通常保持不变
                 mtime = os.path.getmtime(video_path)
-                # 转换为 UTC 时间 (Naive)
-                # datetime.utcfromtimestamp is deprecated
-                creation_time = datetime.fromtimestamp(mtime, timezone.utc).replace(tzinfo=None)
+                # 转换为 UTC 时间 (Aware)
+                creation_time = datetime.fromtimestamp(mtime, timezone.utc)
                 method = "File System MTime (UTC)"
             except:
                 pass
