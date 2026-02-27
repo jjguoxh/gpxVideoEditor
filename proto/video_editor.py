@@ -80,6 +80,12 @@ class VideoEditorApp:
         self.track_thumbnail = None # 轨迹缩略图
         self.track_transform = None # 坐标转换参数
         
+        # 轨迹预览缩放和平移
+        self.align_zoom_scale = 1.0
+        self.align_offset_x = 0.0
+        self.align_offset_y = 0.0
+        self.align_drag_start = None
+        
         # 调试信息
         self.debug_info = {}
         
@@ -305,8 +311,8 @@ class VideoEditorApp:
         self.preview_notebook.pack(fill=tk.BOTH, expand=True)
         video_tab = ttk.Frame(self.preview_notebook)
         self.preview_notebook.add(video_tab, text="视频")
-        self.align_tab = ttk.Frame(self.preview_notebook)
-        self.preview_notebook.add(self.align_tab, text="轨迹对齐")
+        # self.align_tab = ttk.Frame(self.preview_notebook)
+        # self.preview_notebook.add(self.align_tab, text="轨迹对齐")
         self.video_canvas = tk.Canvas(video_tab, bg="#000000", width=640, height=360, highlightthickness=0, bd=0)
         self.video_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.preview_label = ttk.Label(video_tab, text="📹 未加载视频\n\n点击 文件 -> 打开视频 来加载视频文件", font=default_font, foreground="gray", justify=tk.CENTER)
@@ -344,29 +350,52 @@ class VideoEditorApp:
         speed_combo = ttk.Combobox(speed_frame, textvariable=self.speed_var, width=6, values=["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"], state="readonly")
         speed_combo.pack(side=tk.LEFT, padx=2)
         speed_combo.bind('<<ComboboxSelected>>', self.on_speed_change)
-        self.init_align_tab(self.align_tab)
+        # self.init_align_tab(self.align_tab)
         property_frame = ttk.LabelFrame(main_container, text="属性", padding=10, width=250)
         main_container.add(property_frame, weight=1)
         self.create_property_panel(property_frame)
     
     def create_property_panel(self, parent):
         """创建属性面板"""
-        # 视频缩略图预览
-        thumbnail_frame = ttk.LabelFrame(parent, text="视频缩略图", padding=5)
-        thumbnail_frame.pack(fill=tk.X, pady=5)
+        # 轨迹预览 (原视频缩略图位置)
+        self.align_frame = ttk.LabelFrame(parent, text="轨迹预览", padding=5)
+        self.align_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        self.thumbnail_canvas = tk.Canvas(thumbnail_frame, bg="#2B2B2B", height=120, width=160,
+        self.align_canvas = tk.Canvas(self.align_frame, bg="#1E1E1E", height=200, width=160,
                                           highlightthickness=0, bd=0)
-        self.thumbnail_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.align_canvas.bind("<Configure>", lambda e: self.update_align_canvas())
+        self.align_canvas.bind("<MouseWheel>", self.on_align_zoom) # Windows/MacOS
+        self.align_canvas.bind("<Button-4>", self.on_align_zoom)   # Linux Scroll Up
+        self.align_canvas.bind("<Button-5>", self.on_align_zoom)   # Linux Scroll Down
+        self.align_canvas.bind("<ButtonPress-1>", self.on_align_drag_start)
+        self.align_canvas.bind("<B1-Motion>", self.on_align_drag_move)
         
-        # 视频信息
-        info_frame = ttk.LabelFrame(parent, text="视频信息", padding=5)
-        info_frame.pack(fill=tk.X, pady=5)
+        # 轨迹对齐控制 (原视频信息位置)
+        control_frame = ttk.LabelFrame(parent, text="对齐控制", padding=5)
+        control_frame.pack(fill=tk.X, pady=5)
         
-        self.info_text = tk.Text(info_frame, height=8, wrap=tk.WORD, font=default_font,
-                                 state=tk.DISABLED, relief=tk.FLAT)
-        self.info_text.pack(fill=tk.BOTH, expand=True)
+        # 控件
+        self.align_reverse_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(control_frame, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.TOP, anchor=tk.E, padx=5)
         
+        self.align_progress_var = tk.DoubleVar(value=0.0)
+        self.align_scale = ttk.Scale(control_frame, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
+        self.align_scale.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.align_time_label = ttk.Label(control_frame, text="GPX时间: 0.0s")
+        self.align_time_label.pack(side=tk.LEFT, padx=5)
+        
+        self.align_confirm_btn = ttk.Button(control_frame, text="确认对齐", command=self.align_confirm)
+        self.align_confirm_btn.pack(side=tk.RIGHT, padx=5)
+        
+        ttk.Button(control_frame, text="重置视图", command=self.reset_align_view, width=8).pack(side=tk.RIGHT, padx=2)
+        
+        # Init variables
+        self.align_track_points = None
+        self.align_transform = None
+        self.thumbnail_canvas = None # Disable video thumbnail canvas
+
         # 剪辑片段列表
         clip_frame = ttk.LabelFrame(parent, text="剪辑片段", padding=5)
         clip_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -395,23 +424,23 @@ class VideoEditorApp:
         
         self.clip_tree.bind('<Double-1>', self.on_clip_select)
     
-    def init_align_tab(self, parent):
-        self.align_canvas = tk.Canvas(parent, bg="#1E1E1E", height=420, highlightthickness=0, bd=0)
-        self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        bottom = ttk.Frame(parent)
-        bottom.pack(fill=tk.X, padx=6, pady=6)
-        self.align_reverse_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bottom, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.RIGHT, padx=6)
-        self.align_progress_var = tk.DoubleVar(value=0.0)
-        self.align_scale = ttk.Scale(bottom, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
-        self.align_scale.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=6)
-        self.align_time_label = ttk.Label(bottom, text="GPX时间: 0.0s")
-        self.align_time_label.pack(side=tk.LEFT, padx=8)
-        self.align_confirm_btn = ttk.Button(bottom, text="确认对齐", command=self.align_confirm)
-        self.align_confirm_btn.pack(side=tk.RIGHT, padx=6)
-        self.align_canvas.bind("<Configure>", lambda e: self.update_align_canvas())
-        self.align_track_points = None
-        self.align_transform = None
+    # def init_align_tab(self, parent):
+    #     self.align_canvas = tk.Canvas(parent, bg="#1E1E1E", height=420, highlightthickness=0, bd=0)
+    #     self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+    #     bottom = ttk.Frame(parent)
+    #     bottom.pack(fill=tk.X, padx=6, pady=6)
+    #     self.align_reverse_var = tk.BooleanVar(value=False)
+    #     ttk.Checkbutton(bottom, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.RIGHT, padx=6)
+    #     self.align_progress_var = tk.DoubleVar(value=0.0)
+    #     self.align_scale = ttk.Scale(bottom, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
+    #     self.align_scale.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=6)
+    #     self.align_time_label = ttk.Label(bottom, text="GPX时间: 0.0s")
+    #     self.align_time_label.pack(side=tk.LEFT, padx=8)
+    #     self.align_confirm_btn = ttk.Button(bottom, text="确认对齐", command=self.align_confirm)
+    #     self.align_confirm_btn.pack(side=tk.RIGHT, padx=6)
+    #     self.align_canvas.bind("<Configure>", lambda e: self.update_align_canvas())
+    #     self.align_track_points = None
+    #     self.align_transform = None
     
     def get_gpx_duration(self):
         if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']:
@@ -459,6 +488,57 @@ class VideoEditorApp:
         self.align_time_label.config(text=f"GPX时间: 0.0s")
         self.update_align_canvas()
     
+    def reset_align_view(self):
+        """重置轨迹预览视图"""
+        self.align_zoom_scale = 1.0
+        self.align_offset_x = 0.0
+        self.align_offset_y = 0.0
+        self.update_align_canvas()
+        
+    def on_align_zoom(self, event):
+        """处理轨迹预览缩放"""
+        if not self.gpx_data:
+            return
+            
+        # Determine scroll direction
+        if event.num == 5 or event.delta < 0:
+            scale_factor = 0.9
+        else:
+            scale_factor = 1.1
+            
+        # Update zoom scale
+        new_zoom = self.align_zoom_scale * scale_factor
+        if 0.1 <= new_zoom <= 50.0:
+            # Zoom around mouse position
+            w = self.align_canvas.winfo_width()
+            h = self.align_canvas.winfo_height()
+            mx = event.x - w / 2
+            my = event.y - h / 2
+            
+            self.align_offset_x = mx - (mx - self.align_offset_x) * scale_factor
+            self.align_offset_y = my - (my - self.align_offset_y) * scale_factor
+            
+            self.align_zoom_scale = new_zoom
+            self.update_align_canvas()
+            
+    def on_align_drag_start(self, event):
+        """开始拖拽轨迹预览"""
+        self.align_drag_start = (event.x, event.y)
+        
+    def on_align_drag_move(self, event):
+        """拖拽轨迹预览"""
+        if not self.align_drag_start:
+            return
+            
+        dx = event.x - self.align_drag_start[0]
+        dy = event.y - self.align_drag_start[1]
+        
+        self.align_offset_x += dx
+        self.align_offset_y += dy
+        
+        self.align_drag_start = (event.x, event.y)
+        self.update_align_canvas()
+
     def update_align_canvas(self):
         if not hasattr(self, 'align_canvas'):
             return
@@ -472,40 +552,78 @@ class VideoEditorApp:
         pts = []
         for s in self.gpx_data['segments']:
             pts.append((s['lat_start'], s['lon_start']))
-        last = self.gpx_data['segments'][-1]
-        pts.append((last['lat_end'], last['lon_end']))
+        if self.gpx_data['segments']:
+            last = self.gpx_data['segments'][-1]
+            pts.append((last['lat_end'], last['lon_end']))
+            
         lats = [p[0] for p in pts]
         lons = [p[1] for p in pts]
+        if not lats:
+            return
+            
         min_lat, max_lat = min(lats), max(lats)
         min_lon, max_lon = min(lons), max(lons)
+        
         w = max(1, self.align_canvas.winfo_width())
         h = max(1, self.align_canvas.winfo_height())
         padding = 20
+        
         mid_lat = math.radians((min_lat + max_lat) / 2) if max_lat != min_lat else 0.0
         lon_corr = math.cos(mid_lat) if max_lat != min_lat else 1.0
+        
         lat_range = max(1e-9, max_lat - min_lat)
         lon_range = max(1e-9, (max_lon - min_lon) * lon_corr)
+        
+        # Base scale to fit screen
         scale_x = (w - 2 * padding) / lon_range
         scale_y = (h - 2 * padding) / lat_range
-        scale = min(scale_x, scale_y)
+        base_scale = min(scale_x, scale_y)
+        
+        bb_w = lon_range * base_scale
+        bb_h = lat_range * base_scale
+        
+        cx = w / 2
+        cy = h / 2
+        
+        zoom = getattr(self, 'align_zoom_scale', 1.0)
+        off_x = getattr(self, 'align_offset_x', 0.0)
+        off_y = getattr(self, 'align_offset_y', 0.0)
+        
         def tf(lat, lon):
-            x = padding + (lon - min_lon) * lon_corr * scale
-            y = h - padding - (lat - min_lat) * scale
+            norm_x = ((lon - min_lon) * lon_corr / lon_range) - 0.5
+            norm_y = ((lat - min_lat) / lat_range) - 0.5
+            
+            x_base = norm_x * bb_w
+            y_base = -norm_y * bb_h
+            
+            x_zoomed = x_base * zoom
+            y_zoomed = y_base * zoom
+            
+            x = cx + x_zoomed + off_x
+            y = cy + y_zoomed + off_y
             return x, y
+            
         screen = [tf(lat, lon) for lat, lon in pts]
-        for i in range(len(screen) - 1):
-            x1, y1 = screen[i]
-            x2, y2 = screen[i+1]
-            self.align_canvas.create_line(x1, y1, x2, y2, fill="#00FF00", width=2)
+        
+        # Draw all lines at once
+        flat_pts = [coord for pt in screen for coord in pt]
+        if len(flat_pts) >= 4:
+            self.align_canvas.create_line(flat_pts, fill="#00FF00", width=2)
+            
         t = self.align_progress_var.get()
         duration = self.get_gpx_duration()
         eff_t = duration - t if self.align_reverse_var.get() else t
         lat, lon = self._get_latlon_at_gpx_time(eff_t)
+        
         if lat is not None and lon is not None:
             x, y = tf(lat, lon)
             r = 5
             self.align_canvas.create_oval(x-r, y-r, x+r, y+r, fill="#00BFFF", outline="")
-        self.align_transform = (min_lat, min_lon, scale, h, padding, lon_corr)
+            # Crosshair
+            self.align_canvas.create_line(x-10, y, x+10, y, fill="white", width=1)
+            self.align_canvas.create_line(x, y-10, x, y+10, fill="white", width=1)
+            
+        self.align_transform = (min_lat, min_lon, base_scale, h, padding, lon_corr)
         self.align_track_points = pts
     
     def on_align_progress_change(self, value):
@@ -684,9 +802,6 @@ class VideoEditorApp:
             
             # 显示第一帧
             self.seek_to_frame(0)
-            
-            # 生成缩略图
-            self.generate_thumbnail()
             
             self.update_status(f"视频加载成功: {self.video_info['name']} ({width}x{height}, {fps:.2f}fps)")
             
@@ -2192,10 +2307,10 @@ class VideoEditorApp:
 时长: {self.format_time(self.video_info.get('duration', 0))}
 编码: {self.video_info.get('codec', 'N/A')}"""
             
-            self.info_text.config(state=tk.NORMAL)
-            self.info_text.delete(1.0, tk.END)
-            self.info_text.insert(1.0, info_text)
-            self.info_text.config(state=tk.DISABLED)
+            # self.info_text.config(state=tk.NORMAL)
+            # self.info_text.delete(1.0, tk.END)
+            # self.info_text.insert(1.0, info_text)
+            # self.info_text.config(state=tk.DISABLED)
             
             # 更新状态栏
             self.resolution_label.config(text=f"{self.video_info.get('width', 0)}x{self.video_info.get('height', 0)}")
@@ -2561,6 +2676,9 @@ class VideoEditorApp:
         """生成视频缩略图"""
         if not HAS_CV2 or self.cap is None:
             return
+            
+        # 视频缩略图功能已禁用
+        return
         
         try:
             # 获取视频中间位置的帧作为缩略图
