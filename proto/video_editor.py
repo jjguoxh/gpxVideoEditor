@@ -109,6 +109,10 @@ class VideoEditorApp:
         self.loop_playback = False  # 是否循环播放
         self.fullscreen_mode = False  # 是否全屏模式
         
+        # 性能优化
+        self.target_display_size = (640, 360)
+        self.last_frame_processing_time = 0.0
+        
         # 创建GUI
         self.create_menu()
         self.create_toolbar()
@@ -301,6 +305,11 @@ class VideoEditorApp:
         zoom_combo.pack(side=tk.LEFT, padx=2)
         zoom_combo.bind('<<ComboboxSelected>>', self.on_zoom_change)
     
+    def on_canvas_resize(self, event):
+        """画布大小改变"""
+        if event.width > 1 and event.height > 1:
+            self.target_display_size = (event.width, event.height)
+
     def create_main_panel(self):
         """创建主面板（预览窗口和控制面板）"""
         main_container = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -315,6 +324,9 @@ class VideoEditorApp:
         # self.preview_notebook.add(self.align_tab, text="轨迹对齐")
         self.video_canvas = tk.Canvas(video_tab, bg="#000000", width=640, height=360, highlightthickness=0, bd=0)
         self.video_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 绑定画布大小改变事件
+        self.video_canvas.bind('<Configure>', self.on_canvas_resize)
+        
         self.preview_label = ttk.Label(video_tab, text="📹 未加载视频\n\n点击 文件 -> 打开视频 来加载视频文件", font=default_font, foreground="gray", justify=tk.CENTER)
         self.preview_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         control_frame = ttk.Frame(video_tab)
@@ -1878,18 +1890,40 @@ class VideoEditorApp:
             return
             
         fps = self.video_info.get('fps', 30.0)
+        if fps <= 0: fps = 30.0
+        
         # 目标帧间隔
         target_interval = 1.0 / (fps * self.playback_speed)
         
-        last_frame_time = time.time()
-        
-        # 记录上一帧的显示时间，用于计算延迟
         last_display_time = time.time()
+        
+        # 记录开始播放的时间和帧，用于同步
+        start_play_time = time.time()
+        start_frame_pos = self.current_frame_pos
         
         while self.playing and self.cap is not None:
             loop_start_time = time.time()
             
-            # 1. 读取下一帧
+            # 重新计算目标间隔（速度可能改变）
+            target_interval = 1.0 / (fps * self.playback_speed)
+            
+            # 1. 检查是否需要跳帧
+            # 计算理论上应该播放到的帧
+            elapsed_time = loop_start_time - start_play_time
+            expected_frame = start_frame_pos + int(elapsed_time * fps * self.playback_speed)
+            
+            # 获取当前实际帧位置
+            current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            
+            # 如果落后超过5帧，尝试跳帧追赶
+            frame_diff = expected_frame - current_pos
+            if frame_diff > 5:
+                # 一次最多跳10帧，防止卡死
+                skip_count = min(frame_diff - 1, 10)
+                for _ in range(skip_count):
+                    self.cap.grab()
+            
+            # 2. 读取下一帧
             ret, frame = self.cap.read()
             
             if not ret:
@@ -1903,44 +1937,53 @@ class VideoEditorApp:
             
             self.current_frame_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
             
-            # 2. 只有当距离上次显示超过一定间隔时才更新UI（避免过度刷新）
-            # 限制最高刷新率为 30fps，或者原视频帧率（取较小值）
+            # 3. 只有当距离上次显示超过一定间隔时才更新UI（避免过度刷新）
             current_time = time.time()
-            if current_time - last_display_time >= 0.033: # 约30fps
-                # 复制帧数据传递给UI线程，避免冲突
-                display_frame = frame.copy()
-                self.root.after(0, self._display_frame, display_frame)
+            # 限制UI刷新率，例如最高30fps或60fps
+            if current_time - last_display_time >= 0.03: 
+                # 预处理：在工作线程中缩放图像
+                target_w, target_h = self.target_display_size
+                if target_w < 100: target_w = 640
+                if target_h < 100: target_h = 360
+                
+                img_h, img_w = frame.shape[:2]
+                
+                # 只有当原图比目标大很多时才缩放
+                if img_w > target_w * 1.1 or img_h > target_h * 1.1:
+                    ratio = min(target_w / img_w, target_h / img_h)
+                    new_w = int(img_w * ratio)
+                    new_h = int(img_h * ratio)
+                    display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                else:
+                    display_frame = frame.copy()
+                
+                # 传递当前时间点，确保显示准确
+                current_seconds = self.current_frame_pos / fps
+                self.root.after(0, self._display_frame, display_frame, current_seconds)
                 
                 # 更新进度条 (每0.5秒更新一次，避免频繁刷新)
                 if current_time - last_display_time > 0.5:
-                    current_video_time = self.current_frame_pos / fps if fps > 0 else 0
-                    self.root.after(0, self.progress_var.set, current_video_time)
-                    self.root.after(0, self._update_time_display, current_video_time)
+                    self.root.after(0, self.progress_var.set, current_seconds)
+                    self.root.after(0, self._update_time_display, current_seconds)
                 
                 last_display_time = current_time
             
-            # 3. 帧率控制
+            # 4. 帧率控制
             process_time = time.time() - loop_start_time
             sleep_time = target_interval - process_time
             
             if sleep_time > 0:
                 time.sleep(sleep_time)
             else:
-                # 如果处理太慢，不需要sleep，甚至可能需要跳帧（这里暂不实现跳帧）
+                # 如果处理太慢，不需要sleep，下一次循环会通过跳帧逻辑来补偿
                 pass
     
-    def _display_frame(self, frame):
+    def _display_frame(self, frame, current_seconds=None):
         """显示视频帧"""
         if frame is None:
             return
-            
-        # 叠加GPX信息
-        if self.gpx_data:
-            fps = self.video_info.get('fps', 30.0)
-            current_seconds = self.current_frame_pos / fps if fps > 0 else 0
-            self._draw_overlay_on_frame(frame, current_seconds)
-            
-        # 调整大小以适应画布
+
+        # 1. 检查是否需要缩放 (如果传入的是原始大图)
         canvas_width = self.video_canvas.winfo_width()
         canvas_height = self.video_canvas.winfo_height()
         
@@ -1948,20 +1991,24 @@ class VideoEditorApp:
             canvas_width = 640
             canvas_height = 360
             
-        # 保持宽高比
         img_h, img_w = frame.shape[:2]
         
-        # 优化：如果图像尺寸与画布差异不大，不缩放
-        if abs(img_w - canvas_width) > 10 or abs(img_h - canvas_height) > 10:
-            ratio = min(canvas_width / img_w, canvas_height / img_h)
-            new_w = int(img_w * ratio)
-            new_h = int(img_h * ratio)
-            resized_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        else:
-            resized_frame = frame
+        # 如果图像比画布大很多，说明是原始帧，需要缩放
+        if img_w > canvas_width * 1.2 or img_h > canvas_height * 1.2:
+             ratio = min(canvas_width / img_w, canvas_height / img_h)
+             new_w = int(img_w * ratio)
+             new_h = int(img_h * ratio)
+             frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
+        # 2. 叠加GPX信息
+        if self.gpx_data:
+            if current_seconds is None:
+                fps = self.video_info.get('fps', 30.0)
+                current_seconds = self.current_frame_pos / fps if fps > 0 else 0
+            self._draw_overlay_on_frame(frame, current_seconds)
+            
         # 转换为 RGB
-        rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
         # 转换为 ImageTk
         img = Image.fromarray(rgb_frame)
