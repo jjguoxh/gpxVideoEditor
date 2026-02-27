@@ -71,6 +71,8 @@ class VideoEditorApp:
         self.video_info = {}
         self.video_creation_time = None # 视频创建时间
         self.clips = []  # 剪辑片段列表
+        self.timeline_thumbnails = {} # 时间轴缩略图 {time_sec: photo_image}
+        self.thumbnail_thread = None # 缩略图生成线程
         
         # GPX 数据
         self.gpx_data = None  # 格式: {'segments': [(start_time, end_time, speed), ...]}
@@ -700,6 +702,8 @@ class VideoEditorApp:
             
             # 初始化时间轴
             self.timeline_fit()
+            # 启动缩略图生成
+            self.start_timeline_thumbnail_generation()
             # 加载外部GPX文件（不再从视频中提取GPMD）
             self.load_gpx_data(video_path)
             
@@ -2275,6 +2279,15 @@ class VideoEditorApp:
         track_height = 40
         track_y = 10
         
+        # 1. 绘制缩略图背景 (如果有)
+        has_thumbs = hasattr(self, 'timeline_thumbnails') and self.timeline_thumbnails
+        if has_thumbs:
+            # 遍历所有缩略图
+            for t_sec, photo in self.timeline_thumbnails.items():
+                x = t_sec * self.timeline_scale
+                # 绘制图片，垂直居中于轨道
+                self.timeline_canvas.create_image(x, track_y + track_height/2, image=photo, anchor=tk.W)
+        
         for i, clip in enumerate(self.clips):
             start_time = clip['start_frame'] / fps
             end_time = clip['end_frame'] / fps
@@ -2283,14 +2296,24 @@ class VideoEditorApp:
             x2 = end_time * self.timeline_scale
             
             # 绘制片段矩形
-            # 使用不同颜色区分相邻片段
-            color = "#4a90e2" if i % 2 == 0 else "#357abd"
-            
-            self.timeline_canvas.create_rectangle(x1, track_y, x2, track_y + track_height,
-                                                 fill=color, outline="white", tags=("clip", clip['id']))
+            if has_thumbs:
+                # 如果有缩略图，只画边框，以便看到缩略图
+                self.timeline_canvas.create_rectangle(x1, track_y, x2, track_y + track_height,
+                                                     fill="", outline="#4a90e2", width=2, tags=("clip", clip['id']))
+                # 增加一个半透明黑色遮罩来增加文字对比度？(Tkinter不支持)
+                # 我们可以画文字背景
+            else:
+                # 原来的逻辑：实心填充
+                color = "#4a90e2" if i % 2 == 0 else "#357abd"
+                self.timeline_canvas.create_rectangle(x1, track_y, x2, track_y + track_height,
+                                                     fill=color, outline="white", tags=("clip", clip['id']))
             
             # 绘制片段名称
             if x2 - x1 > 20: # 如果够宽才显示文字
+                # 添加文字阴影效果以提高可读性
+                self.timeline_canvas.create_text(x1 + 6, track_y + track_height/2 + 1,
+                                                text=clip['name'], anchor=tk.W, fill="black",
+                                                font=("Arial", 9))
                 self.timeline_canvas.create_text(x1 + 5, track_y + track_height/2,
                                                 text=clip['name'], anchor=tk.W, fill="white",
                                                 font=("Arial", 9))
@@ -2411,6 +2434,124 @@ class VideoEditorApp:
             if width > 0:
                 self.timeline_scale = width / duration
                 self.update_timeline()
+
+    def start_timeline_thumbnail_generation(self):
+        """开始生成时间轴缩略图"""
+        if not HAS_CV2 or not HAS_PIL:
+            return
+            
+        # 停止之前的线程（如果可能）
+        # Python线程难以强制停止，这里我们通过检查 video_path 是否一致来控制退出
+        
+        self.timeline_thumbnails = {}
+        
+        # 启动新线程
+        self.thumbnail_thread = threading.Thread(
+            target=self._generate_timeline_thumbnails_worker,
+            args=(self.video_path,),
+            daemon=True
+        )
+        self.thumbnail_thread.start()
+        
+    def _generate_timeline_thumbnails_worker(self, current_video_path):
+        """生成时间轴缩略图的工作线程"""
+        try:
+            cap = cv2.VideoCapture(current_video_path)
+            if not cap.isOpened():
+                return
+                
+            duration = self.video_info.get('duration', 0)
+            if duration <= 0:
+                return
+
+            # 根据时长决定采样间隔
+            # 目标是生成适量的缩略图，既不影响性能又能覆盖全长
+            # 例如每隔一定像素生成一个缩略图
+            # 假设缩略图宽度为 60px
+            # 但我们在后台生成，不知道当前的 timeline_scale
+            # 所以我们可以固定生成一定数量，或者按时间间隔
+            
+            # 策略：每隔 5-30 秒生成一张，取决于总时长
+            # 如果视频短于 1 分钟，每 1 秒一张
+            # 如果视频长于 1 小时，每 30 秒一张
+            
+            if duration < 60:
+                interval = 1.0
+            elif duration < 600: # 10分钟
+                interval = 5.0
+            elif duration < 3600: # 1小时
+                interval = 10.0
+            else:
+                interval = 30.0
+            
+            fps = self.video_info.get('fps', 30.0)
+            current_time = 0.0
+            
+            count = 0
+            batch_size = 5 # 每生成5张刷新一次界面
+            
+            while current_time < duration:
+                # 检查是否切换了视频
+                if self.video_path != current_video_path:
+                    break
+                    
+                frame_pos = int(current_time * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                ret, frame = cap.read()
+                
+                if ret:
+                    # 调整大小
+                    h, w = frame.shape[:2]
+                    target_h = 40 # 轨道高度
+                    target_w = int(w * (target_h / h))
+                    
+                    frame_resized = cv2.resize(frame, (target_w, target_h))
+                    
+                    # 转换为 RGB
+                    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                    image = Image.fromarray(frame_rgb)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 存储 (需要在主线程使用，但 ImageTk 对象必须在创建它的线程使用? 不，Tkinter对象通常线程不安全)
+                    # ImageTk.PhotoImage 可以在任何线程创建吗？
+                    # 文档建议在主线程创建 Tkinter 对象。
+                    # 但 Image 对象可以在线程中创建。
+                    # 我们可以只存储 Image 对象，在主线程转换为 PhotoImage。
+                    # 或者使用 after 将创建操作调度到主线程。
+                    
+                    # 为了安全，我们将 Image 对象传给主线程
+                    count += 1
+                    should_refresh = (count % batch_size == 0)
+                    self.root.after(0, self._add_thumbnail_to_timeline, current_time, image, should_refresh)
+                
+                current_time += interval
+                time.sleep(0.01) # 避免占用过多CPU
+                
+            cap.release()
+            # 最后确保刷新一次
+            self.root.after(0, lambda: self.draw_timeline_tracks())
+            
+        except Exception as e:
+            print(f"生成缩略图出错: {e}")
+
+    def _add_thumbnail_to_timeline(self, time_sec, pil_image, refresh=True):
+        """在主线程添加缩略图并刷新"""
+        if not HAS_PIL:
+            return
+            
+        try:
+            photo = ImageTk.PhotoImage(pil_image)
+            self.timeline_thumbnails[time_sec] = photo
+            
+            # 刷新显示
+            # 不要在每次添加都完全重绘，可以分批或者直接绘制这个
+            # 但为了简单，我们调用 draw_timeline_tracks
+            # 为了避免过于频繁，可以检查是否需要重绘
+            if refresh:
+                self.draw_timeline_tracks()
+        except Exception as e:
+            print(f"添加缩略图出错: {e}")
+
     
     def update_timeline(self):
         """更新时间轴显示"""
