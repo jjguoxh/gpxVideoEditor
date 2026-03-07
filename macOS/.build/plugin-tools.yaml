@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "GPXVideoTracker-arm64-apple-macosx26.0-debug.exe": ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe>"]
+  "GPXVideoTracker-arm64-apple-macosx26.0-debug.module": ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe>","<GPXVideoTracker-arm64-apple-macosx26.0-debug.module>"]
+  "test": ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe>","<GPXVideoTracker-arm64-apple-macosx26.0-debug.module>"]
+default: "main"
+nodes:
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker":
+    is-mutated: true
+commands:
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker-entitlement.plist"]
+    description: "Write auxiliary file /Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker-entitlement.plist"
+
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/AVPlayerViewRepresentable.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/AppModel.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/ContentView.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/Exporter.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/GPXParser.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/GPXVideoTrackerApp.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/MinimapOverlay.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/TelemetryOverlay.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/TrackMiniMap.swift"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/sources"]
+    description: "Write auxiliary file /Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/sources"
+
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AVPlayerViewRepresentable.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AppModel.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/ContentView.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/Exporter.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXParser.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXVideoTrackerApp.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/MinimapOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TelemetryOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TrackMiniMap.swift.o"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.product/Objects.LinkFileList"
+
+  "/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe>":
+    tool: phony
+    inputs: ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    outputs: ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe>"]
+
+  "<GPXVideoTracker-arm64-apple-macosx26.0-debug.module>":
+    tool: phony
+    inputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AVPlayerViewRepresentable.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AppModel.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/ContentView.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/Exporter.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXParser.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXVideoTrackerApp.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/MinimapOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TelemetryOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TrackMiniMap.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/Modules/GPXVideoTracker.swiftmodule"]
+    outputs: ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.module>"]
+
+  "C.GPXVideoTracker-arm64-apple-macosx26.0-debug.exe":
+    tool: shell
+    inputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AVPlayerViewRepresentable.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AppModel.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/ContentView.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/Exporter.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXParser.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXVideoTrackerApp.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/MinimapOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TelemetryOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TrackMiniMap.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.product/Objects.LinkFileList"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/GPXVideoTracker"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug","-o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker","-module-name","GPXVideoTracker","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_GPXVideoTracker_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx12.0","-Xlinker","-add_ast_path","-Xlinker","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/Modules/GPXVideoTracker.swiftmodule","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.GPXVideoTracker-arm64-apple-macosx26.0-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker-entitlement.plist"]
+    outputs: ["<GPXVideoTracker-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/GPXVideoTracker"
+    args: ["codesign","--force","--sign","-","--entitlements","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker-entitlement.plist","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker"]
+
+  "C.GPXVideoTracker-arm64-apple-macosx26.0-debug.module":
+    tool: shell
+    inputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/AVPlayerViewRepresentable.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/AppModel.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/ContentView.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/Exporter.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/GPXParser.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/GPXVideoTrackerApp.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/MinimapOverlay.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/TelemetryOverlay.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/GPXVideoTracker/TrackMiniMap.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/sources"]
+    outputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AVPlayerViewRepresentable.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/AppModel.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/ContentView.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/Exporter.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXParser.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/GPXVideoTrackerApp.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/MinimapOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TelemetryOverlay.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/TrackMiniMap.swift.o","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/Modules/GPXVideoTracker.swiftmodule"]
+    description: "Compiling Swift Module 'GPXVideoTracker' (9 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","GPXVideoTracker","-emit-dependencies","-emit-module","-emit-module-path","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/Modules/GPXVideoTracker.swiftmodule","-output-file-map","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/output-file-map.json","-incremental","-c","@/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/GPXVideoTracker.build/sources","-I","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx12.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j8","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Volumes/Lacie/project/gpxVideoEditor/macOS/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","GPXVideoTracker_main","-color-diagnostics","-swift-version","5","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","macos"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Volumes/Lacie/project/gpxVideoEditor/macOS/Sources/","/Volumes/Lacie/project/gpxVideoEditor/macOS/Package.swift","/Volumes/Lacie/project/gpxVideoEditor/macOS/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
