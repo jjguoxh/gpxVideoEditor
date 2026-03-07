@@ -1,30 +1,36 @@
-# User specified
-video/
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.env
-.venv
-pip-log.txt
-pip-delete-this-directory.txt
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
 
-# VS Code
-.vscode/
-*.code-workspace
+# Derived data
+DerivedData/
 
-# PyInstaller
-*.spec
-dist/
-build/
+# Swift Package Manager
+.build/
+.swiftpm/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# SwiftPM local packages cache
+Packages/
 
 # Logs
 *.log
+
+# Editors
+.vscode/
+.idea/
+
+# Swap files
+*.swp
+*.swo
