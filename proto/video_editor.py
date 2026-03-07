@@ -124,6 +124,19 @@ class VideoEditorApp:
         self.target_display_size = (640, 360)
         self.last_frame_processing_time = 0.0
         
+        # 外部音轨与导出控制
+        self.external_audio_path = None
+        self.preview_external_audio_var = tk.BooleanVar(value=False)
+        self.remove_original_audio_var = tk.BooleanVar(value=False)
+        
+        # 浮动遥测面板（速度/海拔/坡度）
+        self.telemetry_rect_rel = [0.72, 0.72, 0.25, 0.22]  # x_frac, y_frac, w_frac, h_frac
+        self.telemetry_dragging = False
+        self.telemetry_resizing = False
+        self.telemetry_drag_start = None
+        self.telemetry_resize_margin = 16
+        self.display_frame_rect = None  # (x0, y0, w, h) in canvas px
+        
         # 创建GUI
         self.create_menu()
         self.create_toolbar()
@@ -337,6 +350,10 @@ class VideoEditorApp:
         self.video_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         # 绑定画布大小改变事件
         self.video_canvas.bind('<Configure>', self.on_canvas_resize)
+        # 绑定浮动面板拖放
+        self.video_canvas.bind('<ButtonPress-1>', self.on_video_panel_press)
+        self.video_canvas.bind('<B1-Motion>', self.on_video_panel_drag)
+        self.video_canvas.bind('<ButtonRelease-1>', self.on_video_panel_release)
         
         self.preview_label = ttk.Label(video_tab, text="📹 未加载视频\n\n点击 文件 -> 打开视频 来加载视频文件", font=default_font, foreground="gray", justify=tk.CENTER)
         self.preview_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
@@ -413,6 +430,15 @@ class VideoEditorApp:
         self.align_confirm_btn.pack(side=tk.RIGHT, padx=5)
         
         ttk.Button(control_frame, text="重置视图", command=self.reset_align_view, width=8).pack(side=tk.RIGHT, padx=2)
+        
+        # 音频控制
+        audio_frame = ttk.LabelFrame(parent, text="音频", padding=5)
+        audio_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(audio_frame, text="导入音轨", command=self.import_audio_track, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(audio_frame, text="预览外部音轨", variable=self.preview_external_audio_var, command=self.on_preview_audio_toggle).pack(side=tk.LEFT, padx=8)
+        ttk.Checkbutton(audio_frame, text="移除原声(导出)", variable=self.remove_original_audio_var).pack(side=tk.LEFT, padx=8)
+        self.audio_file_label = ttk.Label(audio_frame, text="未选择音轨")
+        self.audio_file_label.pack(side=tk.LEFT, padx=8)
         
         # Init variables
         self.align_track_points = None
@@ -1785,17 +1811,51 @@ class VideoEditorApp:
             if has_ffmpeg: 
                 self.root.after(0, self.update_status, "正在合并音频...")
                 try:
-                    # ffmpeg -i temp.mp4 -i source.mp4 -c:v copy -c:a aac -map 0:v:0 -map 1:a:0 output.mp4
-                    cmd = [
-                        'ffmpeg', '-y', '-v', 'error',
-                        '-i', temp_video_path,
-                        '-i', self.video_path,
-                        '-c:v', 'copy',
-                        '-c:a', 'aac',
-                        '-map', '0:v:0',
-                        '-map', '1:a:0',
-                        output_path
-                    ]
+                    ext_audio = self.external_audio_path if self.external_audio_path and os.path.exists(self.external_audio_path) else None
+                    remove_orig = bool(self.remove_original_audio_var.get())
+                    if ext_audio and remove_orig:
+                        cmd = [
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', temp_video_path,
+                            '-i', ext_audio,
+                            '-c:v', 'copy',
+                            '-c:a', 'aac',
+                            '-map', '0:v:0',
+                            '-map', '1:a:0',
+                            output_path
+                        ]
+                    elif ext_audio and not remove_orig:
+                        cmd = [
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', temp_video_path,
+                            '-i', self.video_path,
+                            '-i', ext_audio,
+                            '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]',
+                            '-map', '0:v:0',
+                            '-map', '[aout]',
+                            '-c:v', 'copy',
+                            '-c:a', 'aac',
+                            output_path
+                        ]
+                    elif not ext_audio and remove_orig:
+                        cmd = [
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', temp_video_path,
+                            '-c:v', 'copy',
+                            '-an',
+                            output_path
+                        ]
+                    else:
+                        cmd = [
+                            'ffmpeg', '-y', '-v', 'error',
+                            '-i', temp_video_path,
+                            '-i', self.video_path,
+                            '-c:v', 'copy',
+                            '-c:a', 'aac',
+                            '-map', '0:v:0',
+                            '-map', '1:a:0',
+                            output_path
+                        ]
                     
                     startupinfo = None
                     if platform.system() == 'Windows':
@@ -1816,11 +1876,16 @@ class VideoEditorApp:
                     os.rename(temp_video_path, output_path)
                     self.root.after(0, messagebox.showwarning, "警告", f"音频合并失败，导出的视频将没有声音。\n错误: {e}")
             else:
-                # 没有ffmpeg，直接重命名
-                if os.path.exists(output_path):
-                    os.remove(output_path)
-                os.rename(temp_video_path, output_path)
-                self.root.after(0, messagebox.showinfo, "提示", "未检测到FFmpeg，导出的视频将没有声音。")
+                if bool(self.remove_original_audio_var.get()):
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    os.rename(temp_video_path, output_path)
+                    self.root.after(0, messagebox.showinfo, "提示", "未检测到FFmpeg，已导出无声视频。")
+                else:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    os.rename(temp_video_path, output_path)
+                    self.root.after(0, messagebox.showinfo, "提示", "未检测到FFmpeg，导出的视频将没有声音。")
 
             self.root.after(0, self.update_status, f"导出完成: {output_path}")
             self.root.after(0, messagebox.showinfo, "成功", "视频导出成功！")
@@ -1954,16 +2019,9 @@ class VideoEditorApp:
                 spd = 0.5
             elif spd > 2.0:
                 spd = 2.0
-            cmd = [
-                'ffplay',
-                '-nodisp',
-                '-autoexit',
-                '-loglevel', 'error',
-                '-ss', f'{start_time:.3f}',
-                '-i', self.video_path,
-                '-volume', str(vol),
-                '-af', f'atempo={spd}'
-            ]
+            use_external = bool(self.preview_external_audio_var.get() and self.external_audio_path and os.path.exists(self.external_audio_path))
+            src = self.external_audio_path if use_external else self.video_path
+            cmd = ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'error', '-ss', f'{start_time:.3f}', '-i', src, '-volume', str(vol), '-af', f'atempo={spd}']
             if platform.system() == 'Windows':
                 creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
                 self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
@@ -2135,6 +2193,58 @@ class VideoEditorApp:
         y_center = canvas_height // 2
         self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
         self.video_canvas.image = photo # 保持引用防止被垃圾回收
+        # 记录当前帧在画布的位置和大小，供鼠标拖放使用
+        self.display_frame_rect = (x_center - img.width // 2, y_center - img.height // 2, img.width, img.height)
+    
+    def _get_telemetry_rect_px(self, frame_w, frame_h):
+        x_frac, y_frac, w_frac, h_frac = self.telemetry_rect_rel
+        w = max(100, int(w_frac * frame_w))
+        h = max(60, int(h_frac * frame_h))
+        x = max(0, min(int(x_frac * frame_w), frame_w - w))
+        y = max(0, min(int(y_frac * frame_h), frame_h - h))
+        return x, y, w, h
+    
+    def on_video_panel_press(self, event):
+        if not self.display_frame_rect:
+            return
+        fx, fy, fw, fh = self.display_frame_rect
+        mx, my = event.x - fx, event.y - fy
+        if mx < 0 or my < 0 or mx > fw or my > fh:
+            return
+        px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
+        if px <= mx <= px+pw and py <= my <= py+ph:
+            if (px+pw - mx) <= self.telemetry_resize_margin and (py+ph - my) <= self.telemetry_resize_margin:
+                self.telemetry_resizing = True
+            else:
+                self.telemetry_dragging = True
+                self.telemetry_drag_start = (mx - px, my - py)
+    
+    def on_video_panel_drag(self, event):
+        if not self.display_frame_rect:
+            return
+        if not (self.telemetry_dragging or self.telemetry_resizing):
+            return
+        fx, fy, fw, fh = self.display_frame_rect
+        mx, my = event.x - fx, event.y - fy
+        px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
+        if self.telemetry_dragging and self.telemetry_drag_start:
+            dx, dy = self.telemetry_drag_start
+            new_x = max(0, min(mx - dx, fw - pw))
+            new_y = max(0, min(my - dy, fh - ph))
+            self.telemetry_rect_rel[0] = new_x / fw
+            self.telemetry_rect_rel[1] = new_y / fh
+        elif self.telemetry_resizing:
+            new_w = max(100, min(max(10, mx - px), fw - px))
+            new_h = max(60, min(max(10, my - py), fh - py))
+            self.telemetry_rect_rel[2] = new_w / fw
+            self.telemetry_rect_rel[3] = new_h / fh
+        if not self.playing and self.cap is not None:
+            self.seek_to_frame(self.current_frame_pos)
+    
+    def on_video_panel_release(self, event):
+        self.telemetry_dragging = False
+        self.telemetry_resizing = False
+        self.telemetry_drag_start = None
     
     def _draw_overlay_on_frame(self, frame, current_seconds):
         """在帧上绘制GPX叠加层"""
@@ -2187,28 +2297,8 @@ class VideoEditorApp:
                         cv2.circle(frame, (screen_x, screen_y), 6, (255, 0, 0), -1) # 蓝色实心圆
                         cv2.circle(frame, (screen_x, screen_y), 8, (255, 255, 255), 1) # 白色描边
 
-        # 2. 绘制速度表盘
-        gauge_radius = 70
-        gauge_center = (w - gauge_radius - 20, h - gauge_radius - 20)
-        self.draw_speed_gauge(frame, speed, max_speed=60, center=gauge_center, radius=gauge_radius)
-        
-        # 3. 添加文字 (心率) - 如果有心率数据
-        if hr > 0:
-            text_hr = f"{hr} bpm"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = max(0.5, w / 1000.0)
-            thickness = max(1, int(font_scale * 2))
-            
-            text_size_hr = cv2.getTextSize(text_hr, font, font_scale, thickness)[0]
-            # 显示在表盘上方中心
-            text_x_hr = gauge_center[0] - text_size_hr[0] // 2
-            text_y_hr = gauge_center[1] - gauge_radius - 15
-            
-            cv2.putText(frame, text_hr, (text_x_hr, text_y_hr), font, font_scale, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, text_hr, (text_x_hr, text_y_hr), font, font_scale, (0, 0, 255), thickness)
-            
-            # 添加心形图标 (简单的圆)
-            cv2.circle(frame, (text_x_hr - 15, text_y_hr - 5), 6, (0, 0, 255), -1)
+        # 2. 绘制浮动遥测面板（速度/海拔/坡度）
+        self._draw_telemetry_panel(frame, current_seconds, speed)
 
         # 4. 显示调试信息 (始终显示在左上角)
         debug_y = 40
@@ -2238,6 +2328,126 @@ class VideoEditorApp:
                 # 红色文字
                 cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 debug_y += 25
+    
+    def _get_ele_grade_at_time(self, current_seconds):
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
+            return None, None
+        segs = self.gpx_data['segments']
+        if not segs:
+            return None, None
+        t = current_seconds + self.gpx_offset
+        low, high = 0, len(segs) - 1
+        idx = None
+        while low <= high:
+            mid = (low + high) // 2
+            s = segs[mid]
+            if s['start'] <= t <= s['end']:
+                idx = mid
+                break
+            if t < s['start']:
+                high = mid - 1
+            else:
+                low = mid + 1
+        if idx is None:
+            return None, None
+        seg = segs[idx]
+        dur = seg['end'] - seg['start']
+        ratio = 0.0
+        if dur > 0.001:
+            ratio = (t - seg['start']) / dur
+        ele_s = seg.get('ele_start', None)
+        ele_e = seg.get('ele_end', None)
+        ele = None
+        if ele_s is not None and ele_e is not None:
+            ele = ele_s + (ele_e - ele_s) * ratio
+        # 坡度（%）
+        lat1, lon1 = seg.get('lat_start'), seg.get('lon_start')
+        lat2, lon2 = seg.get('lat_end'), seg.get('lon_end')
+        grade = None
+        if None not in (lat1, lon1, lat2, lon2) and ele_s is not None and ele_e is not None:
+            dist = self._haversine_distance(lat1, lon1, lat2, lon2)
+            if dist > 1:
+                grade = (ele_e - ele_s) / dist * 100.0
+            else:
+                grade = 0.0
+        return ele, grade
+    
+    def _draw_telemetry_panel(self, frame, current_seconds, speed):
+        h, w = frame.shape[:2]
+        x, y, ww, hh = self._get_telemetry_rect_px(w, h)
+        x2 = min(w, x + ww)
+        y2 = min(h, y + hh)
+        ww = max(0, x2 - x)
+        hh = max(0, y2 - y)
+        if ww < 10 or hh < 10:
+            return
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 0, 0), -1)
+        alpha = 0.45
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        cv2.rectangle(frame, (x, y), (x+ww, y+hh), (255, 255, 255), 1)
+        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (200, 200, 200), -1)
+        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (80, 80, 80), 1)
+        ele, grade = self._get_ele_grade_at_time(current_seconds)
+        texts = []
+        texts.append(f"速度  {speed:5.1f} km/h")
+        if ele is not None:
+            texts.append(f"海拔  {ele:5.0f} m")
+        if grade is not None:
+            texts.append(f"坡度  {grade:+4.1f}%")
+        try:
+            from PIL import Image as PILImage
+            from PIL import ImageDraw, ImageFont
+            roi = frame[y:y+hh, x:x+ww]
+            pil_img = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+            base_size = max(14, min(int(hh * 0.28), int(ww * 0.14)))
+            font = None
+            font_paths = []
+            sysname = platform.system()
+            if sysname == 'Darwin':
+                font_paths = [
+                    '/System/Library/Fonts/PingFang.ttc',
+                    '/System/Library/Fonts/STHeiti Light.ttc',
+                    '/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc',
+                ]
+            elif sysname == 'Windows':
+                font_paths = [
+                    'C:\\Windows\\Fonts\\msyh.ttc',
+                    'C:\\Windows\\Fonts\\simhei.ttf',
+                    'C:\\Windows\\Fonts\\msyh.ttf',
+                ]
+            else:
+                font_paths = [
+                    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                    '/usr/share/fonts/truetype/arphic/ukai.ttc',
+                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+                ]
+            for p in font_paths:
+                if os.path.exists(p):
+                    try:
+                        font = ImageFont.truetype(p, base_size)
+                        break
+                    except Exception:
+                        pass
+            if font is None:
+                try:
+                    font = ImageFont.load_default()
+                except Exception:
+                    font = None
+            ty = 8
+            for t in texts:
+                if font:
+                    draw.text((12+1, ty+1), t, font=font, fill=(0, 0, 0, 255))
+                    draw.text((12, ty), t, font=font, fill=(255, 255, 255, 255))
+                else:
+                    draw.text((12+1, ty+1), t, fill=(0, 0, 0, 255))
+                    draw.text((12, ty), t, fill=(255, 255, 255, 255))
+                ty += int(base_size * 1.1)
+            new_roi = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            frame[y:y+hh, x:x+ww] = new_roi
+        except Exception:
+            pass
 
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
@@ -2407,6 +2617,27 @@ class VideoEditorApp:
             else:
                 self.stop_audio_playback()
                 self.start_audio_playback(self._current_time())
+
+    def import_audio_track(self):
+        file_path = filedialog.askopenfilename(
+            title="选择音频文件",
+            filetypes=[("音频文件", "*.mp3 *.wav *.m4a *.aac *.flac"), ("所有文件", "*.*")]
+        )
+        if not file_path:
+            return
+        self.external_audio_path = file_path
+        name = os.path.basename(file_path)
+        if hasattr(self, 'audio_file_label'):
+            self.audio_file_label.config(text=name)
+        self.update_status(f"已选择音轨: {name}")
+        if self.playing and bool(self.preview_external_audio_var.get()):
+            self.stop_audio_playback()
+            self.start_audio_playback(self._current_time())
+
+    def on_preview_audio_toggle(self):
+        if self.playing:
+            self.stop_audio_playback()
+            self.start_audio_playback(self._current_time())
     
     def on_volume_change(self, value):
         """音量改变"""
