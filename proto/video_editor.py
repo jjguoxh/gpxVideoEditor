@@ -410,6 +410,8 @@ class VideoEditorApp:
         self.align_canvas.bind("<Button-5>", self.on_align_zoom)   # Linux Scroll Down
         self.align_canvas.bind("<ButtonPress-1>", self.on_align_drag_start)
         self.align_canvas.bind("<B1-Motion>", self.on_align_drag_move)
+        self.align_canvas.bind("<ButtonPress-3>", self.on_align_right_click)  # 右键点击定位
+
         
         # 轨迹对齐控制 (原视频信息位置)
         control_frame = ttk.LabelFrame(parent, text="对齐控制", padding=5)
@@ -423,13 +425,30 @@ class VideoEditorApp:
         self.align_scale = ttk.Scale(control_frame, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
         self.align_scale.pack(fill=tk.X, padx=5, pady=5)
         
-        self.align_time_label = ttk.Label(control_frame, text="GPX时间: 0.0s")
-        self.align_time_label.pack(side=tk.LEFT, padx=5)
+        # 底部控制栏
+        bottom_ctrl_frame = ttk.Frame(control_frame)
+        bottom_ctrl_frame.pack(fill=tk.X, padx=5, pady=2)
         
-        self.align_confirm_btn = ttk.Button(control_frame, text="确认对齐", command=self.align_confirm)
+        self.align_time_label = ttk.Label(bottom_ctrl_frame, text="GPX时间:")
+        self.align_time_label.pack(side=tk.LEFT, padx=2)
+        
+        # 微调 Spinbox
+        self.align_spinbox = ttk.Spinbox(bottom_ctrl_frame, from_=0.0, to=0.0, increment=0.1, 
+                                         textvariable=self.align_progress_var, width=10,
+                                         format="%.2f",
+                                         command=self.on_align_spinbox_change)
+        self.align_spinbox.pack(side=tk.LEFT, padx=2)
+        self.align_spinbox.bind('<Return>', self.on_align_spinbox_change)
+        self.align_spinbox.bind('<FocusOut>', self.on_align_spinbox_change)
+        
+        self.align_confirm_btn = ttk.Button(bottom_ctrl_frame, text="确认对齐", command=self.align_confirm)
         self.align_confirm_btn.pack(side=tk.RIGHT, padx=5)
         
-        ttk.Button(control_frame, text="重置视图", command=self.reset_align_view, width=8).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bottom_ctrl_frame, text="重置视图", command=self.reset_align_view, width=8).pack(side=tk.RIGHT, padx=2)
+        
+        # 提示标签
+        tip_label = ttk.Label(control_frame, text="提示: 右键点击地图轨迹可定位到对应时间点", foreground="gray", font=("Arial", 8))
+        tip_label.pack(fill=tk.X, padx=5, pady=0)
         
         # 音频控制
         audio_frame = ttk.LabelFrame(parent, text="音频", padding=5)
@@ -622,6 +641,8 @@ class VideoEditorApp:
             return
         duration = max(0.0, self.get_gpx_duration())
         self.align_scale.config(from_=0.0, to=duration)
+        if hasattr(self, 'align_spinbox'):
+            self.align_spinbox.config(from_=0.0, to=duration)
         
         # 使用当前视频时间对应的GPX时间来初始化控件
         current_video_time = self._current_time()
@@ -638,7 +659,7 @@ class VideoEditorApp:
         estimated_gpx_time = max(0.0, min(duration, estimated_gpx_time))
         
         self.align_progress_var.set(estimated_gpx_time)
-        self.align_time_label.config(text=f"GPX时间: {estimated_gpx_time:.1f}s")
+        # self.align_time_label.config(text=f"GPX时间: {estimated_gpx_time:.1f}s")
         self.update_align_canvas()
         
         # 更新速度曲线光标
@@ -678,6 +699,14 @@ class VideoEditorApp:
             self.align_zoom_scale = new_zoom
             self.update_align_canvas()
             
+    def on_align_spinbox_change(self, event=None):
+        """处理 Spinbox 变化"""
+        try:
+            val = self.align_progress_var.get()
+            self.on_align_progress_change(val)
+        except Exception:
+            pass
+
     def on_align_drag_start(self, event):
         """开始拖拽轨迹预览"""
         self.align_drag_start = (event.x, event.y)
@@ -695,6 +724,72 @@ class VideoEditorApp:
         
         self.align_drag_start = (event.x, event.y)
         self.update_align_canvas()
+
+    def on_align_right_click(self, event):
+        """右键点击地图定位时间"""
+        if not hasattr(self, 'align_transform_params') or not self.align_transform_params:
+            return
+            
+        # 1. 获取点击坐标并反变换为经纬度
+        x, y = event.x, event.y
+        params = self.align_transform_params
+        
+        zoom = params['zoom']
+        off_x, off_y = params['off_x'], params['off_y']
+        cx, cy = params['cx'], params['cy']
+        bb_w, bb_h = params['bb_w'], params['bb_h']
+        min_lat, min_lon = params['min_lat'], params['min_lon']
+        lon_corr = params['lon_corr']
+        lon_range, lat_range = params['lon_range'], params['lat_range']
+        
+        if zoom == 0 or bb_w == 0 or bb_h == 0 or lon_corr == 0:
+            return
+
+        # 反解坐标变换
+        # x = cx + x_zoomed + off_x
+        x_zoomed = x - cx - off_x
+        y_zoomed = y - cy - off_y
+        
+        # x_zoomed = x_base * zoom
+        x_base = x_zoomed / zoom
+        y_base = y_zoomed / zoom
+        
+        # x_base = norm_x * bb_w
+        norm_x = x_base / bb_w
+        # y_base = -norm_y * bb_h
+        norm_y = -y_base / bb_h
+        
+        # norm_x = ((lon - min_lon) * lon_corr / lon_range) - 0.5
+        click_lon = ((norm_x + 0.5) * lon_range / lon_corr) + min_lon
+        # norm_y = ((lat - min_lat) / lat_range) - 0.5
+        click_lat = ((norm_y + 0.5) * lat_range) + min_lat
+        
+        # 2. 查找最近的 GPX 点
+        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
+            return
+            
+        segments = self.gpx_data['segments']
+        
+        min_dist_sq = float('inf')
+        best_time = 0.0
+        
+        # 采样查找
+        step = 1
+        if len(segments) > 10000:
+            step = 5
+            
+        for i in range(0, len(segments), step):
+            s = segments[i]
+            d_sq = (s['lat_start'] - click_lat)**2 + (s['lon_start'] - click_lon)**2
+            if d_sq < min_dist_sq:
+                min_dist_sq = d_sq
+                best_time = s['start']
+                
+        # 3. 更新 UI
+        self.align_progress_var.set(best_time)
+        self.on_align_progress_change(best_time)
+        
+        self.update_status(f"定位到 GPX 时间: {best_time:.1f}s")
 
     def update_align_canvas(self):
         if not hasattr(self, 'align_canvas'):
@@ -760,12 +855,20 @@ class VideoEditorApp:
             y = cy + y_zoomed + off_y
             return x, y
             
+        # 保存变换参数供点击定位使用
+        self.align_transform_params = {
+            'min_lat': min_lat, 'min_lon': min_lon,
+            'lon_corr': lon_corr, 'lon_range': lon_range, 'lat_range': lat_range,
+            'bb_w': bb_w, 'bb_h': bb_h, 'cx': cx, 'cy': cy,
+            'zoom': zoom, 'off_x': off_x, 'off_y': off_y
+        }
+            
         screen = [tf(lat, lon) for lat, lon in pts]
         
         # Draw all lines at once
         flat_pts = [coord for pt in screen for coord in pt]
         if len(flat_pts) >= 4:
-            self.align_canvas.create_line(flat_pts, fill="#00FF00", width=2)
+            self.align_canvas.create_line(flat_pts, fill="#00FF00", width=2, tags="track")
             
         t = self.align_progress_var.get()
         duration = self.get_gpx_duration()
@@ -775,22 +878,109 @@ class VideoEditorApp:
         if lat is not None and lon is not None:
             x, y = tf(lat, lon)
             r = 5
-            self.align_canvas.create_oval(x-r, y-r, x+r, y+r, fill="#00BFFF", outline="")
+            self.align_canvas.create_oval(x-r, y-r, x+r, y+r, fill="#00BFFF", outline="", tags="cursor")
             # Crosshair
-            self.align_canvas.create_line(x-10, y, x+10, y, fill="white", width=1)
-            self.align_canvas.create_line(x, y-10, x, y+10, fill="white", width=1)
+            self.align_canvas.create_line(x-10, y, x+10, y, fill="white", width=1, tags="cursor")
+            self.align_canvas.create_line(x, y-10, x, y+10, fill="white", width=1, tags="cursor")
             
+        self.align_transform_params = {
+            'min_lat': min_lat, 'min_lon': min_lon,
+            'lon_corr': lon_corr, 'lon_range': lon_range, 'lat_range': lat_range,
+            'bb_w': bb_w, 'bb_h': bb_h, 'cx': cx, 'cy': cy
+        }
         self.align_transform = (min_lat, min_lon, base_scale, h, padding, lon_corr)
         self.align_track_points = pts
     
+    def update_align_cursor(self, gpx_time):
+        """更新对齐视图中的光标位置（优化版，不重绘整个轨迹）"""
+        if not hasattr(self, 'align_canvas'):
+            return
+            
+        # 1. 更新滑块和时间标签
+        # 注意：align_progress_var 在反向模式下需要反转逻辑
+        duration = self.get_gpx_duration()
+        slider_val = gpx_time
+        
+        # 如果当前是反向模式，align_progress_var 应该显示 "倒数" 的时间还是正向时间？
+        # 参考 update_align_controls: 
+        # if reverse: estimated_gpx_time = duration - estimated_gpx_time
+        # self.align_progress_var.set(estimated_gpx_time)
+        # 所以 align_progress_var 存储的是 "显示值"
+        
+        if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get():
+            slider_val = duration - gpx_time
+            
+        # 更新变量（避免触发 on_align_progress_change 回调导致循环调用，或者接受它）
+        # on_align_progress_change 会调用 update_align_canvas 和 update_chart_cursors
+        # 我们只想更新 UI 显示，不希望触发重绘
+        # 但 Tkinter 的 set() 会触发 trace，这里使用的是 command 回调
+        # Scale 的 command 回调只在用户交互时触发吗？通常是的，但在 set() 时不会触发 command
+        # 除非绑定了 variable 的 trace。这里使用的是 command=self.on_align_progress_change
+        self._is_updating_ui = True
+        try:
+            self.align_progress_var.set(slider_val)
+        finally:
+            self._is_updating_ui = False
+            
+        # self.align_time_label.config(text=f"GPX时间: {gpx_time:.1f}s")
+        
+        # 2. 更新地图光标
+        # 需要变换参数
+        if not hasattr(self, 'align_transform_params'):
+            return
+            
+        params = self.align_transform_params
+        lat, lon = self._get_latlon_at_gpx_time(gpx_time)
+        
+        if lat is None or lon is None:
+            return
+            
+        # 计算屏幕坐标
+        zoom = getattr(self, 'align_zoom_scale', 1.0)
+        off_x = getattr(self, 'align_offset_x', 0.0)
+        off_y = getattr(self, 'align_offset_y', 0.0)
+        
+        min_lon = params['min_lon']
+        min_lat = params['min_lat']
+        lon_corr = params['lon_corr']
+        lon_range = params['lon_range']
+        lat_range = params['lat_range']
+        bb_w = params['bb_w']
+        bb_h = params['bb_h']
+        cx = params['cx']
+        cy = params['cy']
+        
+        norm_x = ((lon - min_lon) * lon_corr / lon_range) - 0.5
+        norm_y = ((lat - min_lat) / lat_range) - 0.5
+        
+        x_base = norm_x * bb_w
+        y_base = -norm_y * bb_h
+        
+        x_zoomed = x_base * zoom
+        y_zoomed = y_base * zoom
+        
+        x = cx + x_zoomed + off_x
+        y = cy + y_zoomed + off_y
+        
+        # 移动或创建光标
+        self.align_canvas.delete("cursor")
+        r = 5
+        self.align_canvas.create_oval(x-r, y-r, x+r, y+r, fill="#00BFFF", outline="", tags="cursor")
+        # Crosshair
+        self.align_canvas.create_line(x-10, y, x+10, y, fill="white", width=1, tags="cursor")
+        self.align_canvas.create_line(x, y-10, x, y+10, fill="white", width=1, tags="cursor")
+
     def on_align_progress_change(self, value):
+        if getattr(self, '_is_updating_ui', False):
+            return
+            
         try:
             v = float(value)
         except:
             v = 0.0
         duration = self.get_gpx_duration()
         eff_v = duration - v if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get() else v
-        self.align_time_label.config(text=f"GPX时间: {eff_v:.1f}s")
+        # self.align_time_label.config(text=f"GPX时间: {eff_v:.1f}s")
         self.update_align_canvas()
         
         # 更新图表光标
@@ -2745,6 +2935,10 @@ class VideoEditorApp:
                 gpx_time = gpx_duration - gpx_time
             
             self.update_chart_cursors(gpx_time)
+            
+            # 更新对齐视图光标（如果在播放时也想看到地图上的点移动）
+            if hasattr(self, 'update_align_cursor'):
+                self.update_align_cursor(gpx_time)
     
     def seek_to_frame(self, frame_number):
         """跳转到指定帧"""
