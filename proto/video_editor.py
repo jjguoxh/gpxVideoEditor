@@ -1205,6 +1205,12 @@ class VideoEditorApp:
             smoothed_segments.append(s)
             
         self.gpx_data['smoothed_segments'] = smoothed_segments
+        
+        # 保存平滑后的数组，供快速绘图使用
+        self.smooth_lats = smooth_lats
+        self.smooth_lons = smooth_lons
+        # smooth_lats/lons 长度是 n+1 (包含最后一个点)
+        
         self._last_idx = 0
 
     def _get_smoothed_state(self, t):
@@ -2511,86 +2517,53 @@ class VideoEditorApp:
         # 但我们是以摄像机为中心绘图。
         # 所以当前点在摄像机坐标系中的位置是 (0, 100) (假设Y轴向前)
         
-        # 让我们直接计算相对于当前点的相对坐标，然后应用旋转和平移
-        # 相对坐标 (dx, dy)
-        # 旋转后坐标 (rx, ry): 使得 Y轴正方向 = 前进方向
-        # rx = dx * cos(h) + dy * sin(h)  <-- 这是一个旋转变换
-        # ry = -dx * sin(h) + dy * cos(h)
-        # 
-        # 修正：Heading通常是顺时针从北开始。
-        # North(0): dy>0. East(90): dx>0.
-        # 我们要转到 Up(Screen -Y).
-        # 让我们用标准数学：
-        # 1. 计算 dx (East), dy (North) relative to current pos.
-        # 2. Rotate so that Heading aligns with +Y (local forward).
-        #    Local_Y = North * cos(h) + East * sin(h)
-        #    Local_X = East * cos(h) - North * sin(h)
-        # 3. Convert to Screen:
-        #    Screen_X = cx + Local_X * scale
-        #    Screen_Y = cy - (Local_Y - cam_behind_m) * scale  (Subtract because Screen Y is down, and shift by camera offset)
+        # 使用numpy加速计算
+        # 1. 确定索引范围
+        start_idx = max(0, self._last_idx - 300)
+        end_idx = min(len(segs), self._last_idx + 300)
         
-        start_idx = 0
-        end_idx = len(segs)
+        if start_idx >= end_idx:
+            return
+
+        # 检查是否有缓存的numpy数组
+        if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
+            lats = self.smooth_lats[start_idx:end_idx]
+            lons = self.smooth_lons[start_idx:end_idx]
+        else:
+            # 尝试重新生成平滑数据以获取缓存 (Lazy Init)
+            self._smooth_gpx_data()
+            if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
+                lats = self.smooth_lats[start_idx:end_idx]
+                lons = self.smooth_lons[start_idx:end_idx]
+            else:
+                # 回退到列表推导
+                lats = np.array([s['lat'] for s in segs[start_idx:end_idx]])
+                lons = np.array([s['lon'] for s in segs[start_idx:end_idx]])
+            
+        # 向量化计算
+        # 1. 相对距离 (米)
+        dys = (lats - cur_lat) * 111320
+        dxs = (lons - cur_lon) * 111320 * math.cos(math.radians(cur_lat))
         
-        # 简单的二分查找或估算索引
-        # 假设 segments 按时间排序
-        # 找到当前时间 t
-        # ... 暂时全量遍历，如果卡顿再优化
+        # 2. 旋转
+        # Local Forward (Y') = dy * cos(h) + dx * sin(h)
+        # Local Right (X') = dx * cos(h) - dy * sin(h)
+        local_ys = dys * cos_h + dxs * sin_h
+        local_xs = dxs * cos_h - dys * sin_h
         
-        subset = []
-        # 优化：只绘制前后一定时间范围内的点
-        time_window = 300 # 秒
-        # 快速定位
-        # 我们已经在 _get_smoothed_state 中用过二分查找，可以复用索引
-        # 这里为了简单，先全量遍历，性能瓶颈通常在渲染而非计算坐标
+        # 3. 转换为屏幕坐标
+        sxs = cx + local_xs * scale
+        sys = cy - (local_ys + cam_behind_m) * scale
         
-        for i in range(max(0, self._last_idx - 300), min(len(segs), self._last_idx + 300)):
-             s = segs[i]
-             subset.append(s)
+        # 4. 过滤屏幕外的点 (可选优化)
+        # margin = 50
+        # mask = (sxs >= -margin) & (sxs < view_size + margin) & (sys >= -margin) & (sys < view_size + margin)
+        # sxs = sxs[mask]
+        # sys = sys[mask]
         
-        if not subset:
-             subset = segs[max(0, self._last_idx - 300) : min(len(segs), self._last_idx + 300)]
-             
-        pts_screen = []
-        
-        for s in subset:
-            # 计算相对距离 (米)
-            # 使用简单的平面近似 (墨卡托)
-            # lat_diff = s['lat'] - cur_lat
-            # lon_diff = s['lon'] - cur_lon
-            # dy = lat_diff * 111320
-            # dx = lon_diff * 111320 * math.cos(math.radians(cur_lat))
-            
-            dy = (s['lat'] - cur_lat) * 111320
-            dx = (s['lon'] - cur_lon) * 111320 * math.cos(math.radians(cur_lat))
-            
-            # 旋转
-            # Heading 0 (North): dy axis. 
-            # We want Heading to be UP.
-            # Local Forward (Y') = dy * cos(h) + dx * sin(h)
-            # Local Right (X') = dx * cos(h) - dy * sin(h)
-            
-            local_y = dy * cos_h + dx * sin_h
-            local_x = dx * cos_h - dy * sin_h
-            
-            # 转换为屏幕坐标
-            # 摄像机位于 Local (0, -100). 
-            # 也就是 当前点 (0,0) 在 摄像机前方 100米.
-            # 屏幕中心 (cx, cy) 对应 摄像机位置.
-            # screen_x = cx + local_x * scale
-            # screen_y = cy - (local_y + 100) * scale  <-- No.
-            # Let's verify:
-            # If local_y = 0 (current point), screen_y = cy - (0 - (-100))? No.
-            # Relative to camera: Point Y_cam = local_y - (-100) = local_y + 100.
-            # Screen Y = cy - Y_cam * scale = cy - (local_y + 100) * scale.
-            # Correct.
-            
-            sx = int(cx + local_x * scale)
-            sy = int(cy - (local_y + cam_behind_m) * scale)
-            
-            pts_screen.append([sx, sy])
-            
-        pts_screen = np.array(pts_screen, dtype=np.int32)
+        # 转换并堆叠
+        pts_screen = np.stack((sxs, sys), axis=1).astype(np.int32)
+
         
         # 绘制轨迹
         if len(pts_screen) > 1:
@@ -2610,20 +2583,21 @@ class VideoEditorApp:
         
         roi = frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size]
         
-        # 简单 Alpha 混合
+        # 简单 Alpha 混合 (使用整数运算优化)
         # 假设 overlay 是 BGRA
-        # 但我们创建的是 zeros(..., 4)
-        # 颜色是 (0, 255, 0, 200) -> BGR + Alpha
         
         # 分离通道
-        ov_bgr = overlay[:, :, :3]
-        ov_a = overlay[:, :, 3] / 255.0
+        ov_bgr = overlay[:, :, :3].astype(np.int32)
+        ov_alpha = overlay[:, :, 3].astype(np.int32)[:, :, np.newaxis]
         
-        # 扩展 alpha 到 3 通道
-        ov_a = cv2.merge([ov_a, ov_a, ov_a])
+        roi_int = roi.astype(np.int32)
         
-        # 混合
-        blended = (ov_bgr * ov_a + roi * (1.0 - ov_a)).astype(np.uint8)
+        # 混合: (src * alpha + dst * (255 - alpha)) / 255
+        # 使用位移优化除法 ( >> 8 ) 近似 / 256, 或者直接 / 255
+        # 为了准确性使用 / 255
+        
+        blended = (ov_bgr * ov_alpha + roi_int * (255 - ov_alpha)) // 255
+        blended = blended.astype(np.uint8)
         
         frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size] = blended
         
