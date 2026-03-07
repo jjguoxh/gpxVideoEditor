@@ -1119,6 +1119,154 @@ class VideoEditorApp:
         
     # 已移除：GPMD 流索引与解析函数（get_gpmd_stream_index / extract_gpmd_data / parse_gpmd_structure）
 
+    def _smooth_gpx_data(self):
+        """对GPX数据进行平滑处理 (坐标和航向)"""
+        if not self.gpx_data or 'segments' not in self.gpx_data:
+            return
+            
+        segments = self.gpx_data['segments']
+        if not segments:
+            return
+            
+        n = len(segments)
+        # 提取 lat/lon
+        lats = []
+        lons = []
+        for s in segments:
+            lats.append(s['lat_start'])
+            lons.append(s['lon_start'])
+        # 添加最后一个点
+        lats.append(segments[-1]['lat_end'])
+        lons.append(segments[-1]['lon_end'])
+        
+        lats = np.array(lats)
+        lons = np.array(lons)
+        
+        # 1. 坐标平滑 (简单的滑动平均)
+        window_size = 5 # 减小窗口以保留转弯细节
+        if len(lats) > window_size:
+            kernel = np.ones(window_size) / window_size
+            pad_width = window_size // 2
+            smooth_lats = np.convolve(np.pad(lats, (pad_width, pad_width), mode='edge'), kernel, mode='valid')
+            smooth_lons = np.convolve(np.pad(lons, (pad_width, pad_width), mode='edge'), kernel, mode='valid')
+            
+            # 截断多余的 (如果卷积后长度不一致)
+            smooth_lats = smooth_lats[:len(lats)]
+            smooth_lons = smooth_lons[:len(lons)]
+        else:
+            smooth_lats = lats
+            smooth_lons = lons
+        
+        # 2. 计算航向 (Heading)
+        headings = []
+        for i in range(len(smooth_lats) - 1):
+            lat1, lon1 = smooth_lats[i], smooth_lons[i]
+            lat2, lon2 = smooth_lats[i+1], smooth_lons[i+1]
+            
+            dy = (lat2 - lat1)
+            dx = (lon2 - lon1) * math.cos(math.radians(lat1))
+            
+            if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+                h = 0.0 if not headings else headings[-1]
+            else:
+                h = math.degrees(math.atan2(dx, dy))
+                if h < 0: h += 360
+            headings.append(h)
+            
+        # 补全最后一个航向
+        if headings:
+            headings.append(headings[-1])
+        else:
+            headings = [0.0] * len(smooth_lats)
+            
+        # 3. 航向平滑
+        if len(headings) > window_size:
+            rad_headings = np.radians(headings)
+            sin_h = np.sin(rad_headings)
+            cos_h = np.cos(rad_headings)
+            
+            pad_width = window_size // 2
+            smooth_sin = np.convolve(np.pad(sin_h, (pad_width, pad_width), mode='edge'), kernel, mode='valid')
+            smooth_cos = np.convolve(np.pad(cos_h, (pad_width, pad_width), mode='edge'), kernel, mode='valid')
+            
+            smooth_headings = np.degrees(np.arctan2(smooth_sin, smooth_cos))
+            smooth_headings = (smooth_headings + 360) % 360
+            smooth_headings = smooth_headings[:len(headings)]
+        else:
+            smooth_headings = np.array(headings)
+            
+        # 保存结果
+        smoothed_segments = []
+        for i in range(n):
+            s = segments[i].copy()
+            s['lat'] = smooth_lats[i]
+            s['lon'] = smooth_lons[i]
+            s['heading'] = smooth_headings[i]
+            smoothed_segments.append(s)
+            
+        self.gpx_data['smoothed_segments'] = smoothed_segments
+        self._last_idx = 0
+
+    def _get_smoothed_state(self, t):
+        """获取指定时间的平滑状态 (lat, lon, heading)"""
+        if not self.gpx_data or 'smoothed_segments' not in self.gpx_data:
+            return None
+            
+        segs = self.gpx_data['smoothed_segments']
+        if not segs:
+            return None
+
+        # 二分查找
+        low, high = 0, len(segs) - 1
+        idx = -1
+        
+        # 优化：从上次索引开始搜索
+        if hasattr(self, '_last_idx') and 0 <= self._last_idx < len(segs):
+            if segs[self._last_idx]['start'] <= t <= segs[self._last_idx]['end']:
+                idx = self._last_idx
+        
+        if idx == -1:
+            while low <= high:
+                mid = (low + high) // 2
+                s = segs[mid]
+                if s['start'] <= t <= s['end']:
+                    idx = mid
+                    break
+                elif t < s['start']:
+                    high = mid - 1
+                else:
+                    low = mid + 1
+        
+        if idx != -1:
+            self._last_idx = idx
+            s = segs[idx]
+            # 插值
+            dur = s['end'] - s['start']
+            ratio = 0.0
+            if dur > 0.001:
+                ratio = (t - s['start']) / dur
+            
+            # 下一个点
+            next_s = segs[idx+1] if idx < len(segs)-1 else s
+            
+            # 线性插值
+            lat = s['lat'] + (next_s['lat'] - s['lat']) * ratio
+            lon = s['lon'] + (next_s['lon'] - s['lon']) * ratio
+            
+            # 航向插值 (处理0/360)
+            h1 = s['heading']
+            h2 = next_s['heading']
+            
+            diff = h2 - h1
+            if diff > 180: diff -= 360
+            elif diff < -180: diff += 360
+            
+            heading = (h1 + diff * ratio) % 360
+            
+            return lat, lon, heading
+            
+        return None
+
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate haversine distance between two points in meters"""
         R = 6371000 # Earth radius in meters
@@ -1261,6 +1409,9 @@ class VideoEditorApp:
             # 更新对齐页控件
             if hasattr(self, 'update_align_controls'):
                 self.update_align_controls()
+            
+            # 平滑GPX数据
+            self._smooth_gpx_data()
             
             # 更新速度曲线
             if hasattr(self, 'update_data_charts'):
@@ -2254,51 +2405,12 @@ class VideoEditorApp:
         speed, hr, lat, lon = self.get_data_at_time(current_seconds)
         h, w = frame.shape[:2]
         
-        # 1. 绘制轨迹缩略图 (右上角)
-        if self.track_thumbnail is not None and self.track_transform is not None:
-            thumb_h, thumb_w = self.track_thumbnail.shape[:2]
-            
-            # 确保缩略图不比视频大且位置合理
-            if thumb_h < h and thumb_w < w:
-                # 位置：右上角，边距20
-                x_offset = w - thumb_w - 20
-                y_offset = 20
-                
-                # 提取ROI
-                roi = frame[y_offset:y_offset+thumb_h, x_offset:x_offset+thumb_w]
-                
-                # Alpha混合
-                thumb_bgr = self.track_thumbnail[:, :, :3]
-                thumb_alpha = self.track_thumbnail[:, :, 3] / 255.0
-                thumb_alpha_3ch = cv2.merge([thumb_alpha, thumb_alpha, thumb_alpha])
-                
-                blended = (thumb_bgr * thumb_alpha_3ch + roi * (1.0 - thumb_alpha_3ch)).astype(np.uint8)
-                frame[y_offset:y_offset+thumb_h, x_offset:x_offset+thumb_w] = blended
-                
-                # 绘制当前位置 (闪烁蓝点)
-                if lat is not None and lon is not None:
-                    # 解包变换参数 (支持旧版和新版)
-                    if len(self.track_transform) == 5:
-                        min_lat, min_lon, scale, t_h, padding = self.track_transform
-                        lon_correction = 1.0
-                    else:
-                        min_lat, min_lon, scale, t_h, padding, lon_correction = self.track_transform
-                    
-                    # 计算坐标
-                    pt_x = int(padding + (lon - min_lon) * lon_correction * scale)
-                    pt_y = int(t_h - padding - (lat - min_lat) * scale)
-                    
-                    # 转换为屏幕坐标
-                    screen_x = x_offset + pt_x
-                    screen_y = y_offset + pt_y
-                    
-                    # 闪烁效果 (每秒闪烁约2次)
-                    if int(time.time() * 4) % 2 == 0:
-                        cv2.circle(frame, (screen_x, screen_y), 6, (255, 0, 0), -1) # 蓝色实心圆
-                        cv2.circle(frame, (screen_x, screen_y), 8, (255, 255, 255), 1) # 白色描边
+        # 1. 绘制轨迹 (局部跟随视角)
+        self._draw_local_track_view(frame, current_seconds)
 
         # 2. 绘制浮动遥测面板（速度/海拔/坡度）
-        self._draw_telemetry_panel(frame, current_seconds, speed)
+        if hasattr(self, '_draw_telemetry_panel'):
+            self._draw_telemetry_panel(frame, current_seconds, speed)
 
         # 4. 显示调试信息 (始终显示在左上角)
         debug_y = 40
@@ -2328,6 +2440,197 @@ class VideoEditorApp:
                 # 红色文字
                 cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 debug_y += 25
+
+                    
+    def _draw_local_track_view(self, frame, current_seconds):
+        """绘制局部跟随视角轨迹"""
+        if not self.gpx_data or 'smoothed_segments' not in self.gpx_data:
+            return
+
+        # 获取当前状态
+        # 1. 插值获取当前平滑后的 lat, lon, heading
+        t = current_seconds + self.gpx_offset
+        state = self._get_smoothed_state(t)
+        if not state:
+            return
+            
+        cur_lat, cur_lon, cur_heading = state
+        
+        # 参数设置
+        h, w = frame.shape[:2]
+        # 动态调整视图大小
+        view_size = min(int(w * 0.3), int(h * 0.4))
+        view_size = max(150, min(view_size, 300))
+        
+        scale = 1.0      # 缩放比例 (像素/米) - 300米高度大约对应 0.5-1.0
+        # 300m 高度，假设垂直FOV 60度 -> 地面可见高度 ~346m
+        # 如果视图高度200px -> 346m -> scale = 0.58 px/m
+        scale = view_size / 350.0 
+        
+        cam_behind_m = 100.0 # 摄像机在后方100米
+        
+        # 创建透明图层
+        overlay = np.zeros((view_size, view_size, 4), dtype=np.uint8)
+        
+        # 绘图中心 (摄像机位置)
+        # 调整摄像机位置到视图下方，以便看到前方更多路况
+        cx, cy = view_size // 2, view_size - 30
+        
+        # 坐标转换函数: 世界坐标(米) -> 屏幕坐标(像素)
+        # 1. 以摄像机为原点 (当前点前100米) -> 世界坐标
+        # 2. 旋转 (heading向上)
+        # 3. 缩放 + 平移
+        
+        # 预先筛选附近的点 (比如前后1000米范围)
+        # 简单起见，遍历所有点（优化：可以使用空间索引或时间索引）
+        # 这里使用时间窗口优化：前后 120秒
+        
+        segs = self.gpx_data['smoothed_segments']
+        
+        # 找到当前时间对应的索引附近的点
+        # 简单遍历优化：只取当前时间前后N个点
+        # 假设1秒1个点，取前后300个点
+        
+        points_to_draw = []
+        
+        # 旋转矩阵 (逆时针旋转 -heading + 90? No, heading is usually 0=North, 90=East)
+        # 我们希望 Heading 指向 屏幕上方 (-Y)
+        # 原始 Heading: 0=N, 90=E. 
+        # 屏幕坐标: 0度=右, 90度=下 (通常数学定义)
+        # 让我们使用标准变换：
+        # dx, dy 是相对于当前点的墨卡托投影距离 (米)
+        # 旋转角度 theta = -heading (把当前方向转到正北/正上)
+        # 实际上我们希望 Heading 对应屏幕 UP (-y)
+        
+        rad_heading = math.radians(cur_heading)
+        cos_h = math.cos(rad_heading)
+        sin_h = math.sin(rad_heading)
+        
+        # 摄像机位置 (相对于当前点): 位于后方100米
+        # 也就是说，摄像机坐标 = 当前点坐标 - 100m * 方向向量
+        # 但我们是以摄像机为中心绘图。
+        # 所以当前点在摄像机坐标系中的位置是 (0, 100) (假设Y轴向前)
+        
+        # 让我们直接计算相对于当前点的相对坐标，然后应用旋转和平移
+        # 相对坐标 (dx, dy)
+        # 旋转后坐标 (rx, ry): 使得 Y轴正方向 = 前进方向
+        # rx = dx * cos(h) + dy * sin(h)  <-- 这是一个旋转变换
+        # ry = -dx * sin(h) + dy * cos(h)
+        # 
+        # 修正：Heading通常是顺时针从北开始。
+        # North(0): dy>0. East(90): dx>0.
+        # 我们要转到 Up(Screen -Y).
+        # 让我们用标准数学：
+        # 1. 计算 dx (East), dy (North) relative to current pos.
+        # 2. Rotate so that Heading aligns with +Y (local forward).
+        #    Local_Y = North * cos(h) + East * sin(h)
+        #    Local_X = East * cos(h) - North * sin(h)
+        # 3. Convert to Screen:
+        #    Screen_X = cx + Local_X * scale
+        #    Screen_Y = cy - (Local_Y - cam_behind_m) * scale  (Subtract because Screen Y is down, and shift by camera offset)
+        
+        start_idx = 0
+        end_idx = len(segs)
+        
+        # 简单的二分查找或估算索引
+        # 假设 segments 按时间排序
+        # 找到当前时间 t
+        # ... 暂时全量遍历，如果卡顿再优化
+        
+        subset = []
+        # 优化：只绘制前后一定时间范围内的点
+        time_window = 300 # 秒
+        # 快速定位
+        # 我们已经在 _get_smoothed_state 中用过二分查找，可以复用索引
+        # 这里为了简单，先全量遍历，性能瓶颈通常在渲染而非计算坐标
+        
+        for i in range(max(0, self._last_idx - 300), min(len(segs), self._last_idx + 300)):
+             s = segs[i]
+             subset.append(s)
+        
+        if not subset:
+             subset = segs[max(0, self._last_idx - 300) : min(len(segs), self._last_idx + 300)]
+             
+        pts_screen = []
+        
+        for s in subset:
+            # 计算相对距离 (米)
+            # 使用简单的平面近似 (墨卡托)
+            # lat_diff = s['lat'] - cur_lat
+            # lon_diff = s['lon'] - cur_lon
+            # dy = lat_diff * 111320
+            # dx = lon_diff * 111320 * math.cos(math.radians(cur_lat))
+            
+            dy = (s['lat'] - cur_lat) * 111320
+            dx = (s['lon'] - cur_lon) * 111320 * math.cos(math.radians(cur_lat))
+            
+            # 旋转
+            # Heading 0 (North): dy axis. 
+            # We want Heading to be UP.
+            # Local Forward (Y') = dy * cos(h) + dx * sin(h)
+            # Local Right (X') = dx * cos(h) - dy * sin(h)
+            
+            local_y = dy * cos_h + dx * sin_h
+            local_x = dx * cos_h - dy * sin_h
+            
+            # 转换为屏幕坐标
+            # 摄像机位于 Local (0, -100). 
+            # 也就是 当前点 (0,0) 在 摄像机前方 100米.
+            # 屏幕中心 (cx, cy) 对应 摄像机位置.
+            # screen_x = cx + local_x * scale
+            # screen_y = cy - (local_y + 100) * scale  <-- No.
+            # Let's verify:
+            # If local_y = 0 (current point), screen_y = cy - (0 - (-100))? No.
+            # Relative to camera: Point Y_cam = local_y - (-100) = local_y + 100.
+            # Screen Y = cy - Y_cam * scale = cy - (local_y + 100) * scale.
+            # Correct.
+            
+            sx = int(cx + local_x * scale)
+            sy = int(cy - (local_y + cam_behind_m) * scale)
+            
+            pts_screen.append([sx, sy])
+            
+        pts_screen = np.array(pts_screen, dtype=np.int32)
+        
+        # 绘制轨迹
+        if len(pts_screen) > 1:
+            cv2.polylines(overlay, [pts_screen], False, (0, 255, 0, 200), 2, cv2.LINE_AA)
+            
+        # 绘制当前点 (实心圆)
+        # 当前点在 Local (0,0)
+        curr_sx = int(cx)
+        curr_sy = int(cy - cam_behind_m * scale)
+        cv2.circle(overlay, (curr_sx, curr_sy), 5, (0, 0, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(overlay, (curr_sx, curr_sy), 7, (255, 255, 255, 255), 1, cv2.LINE_AA)
+        
+        # 叠加到 Frame
+        h, w = frame.shape[:2]
+        x_offset = w - view_size - 20
+        y_offset = 20
+        
+        roi = frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size]
+        
+        # 简单 Alpha 混合
+        # 假设 overlay 是 BGRA
+        # 但我们创建的是 zeros(..., 4)
+        # 颜色是 (0, 255, 0, 200) -> BGR + Alpha
+        
+        # 分离通道
+        ov_bgr = overlay[:, :, :3]
+        ov_a = overlay[:, :, 3] / 255.0
+        
+        # 扩展 alpha 到 3 通道
+        ov_a = cv2.merge([ov_a, ov_a, ov_a])
+        
+        # 混合
+        blended = (ov_bgr * ov_a + roi * (1.0 - ov_a)).astype(np.uint8)
+        
+        frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size] = blended
+        
+        # 画个边框
+        cv2.rectangle(frame, (x_offset, y_offset), (x_offset+view_size, y_offset+view_size), (255, 255, 255), 1)
+        cv2.putText(frame, "Follow Cam", (x_offset + 5, y_offset + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
     
     def _get_ele_grade_at_time(self, current_seconds):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
