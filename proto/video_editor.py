@@ -22,6 +22,13 @@ import tempfile
 import json
 import re
 import signal
+try:
+    from .hud import ElevationPanel, TelemetryPanel, TrackPanel
+    from .hud_settings_dialog import HudSettingsDialog
+except ImportError:
+    # Fallback for running as a script
+    from hud import ElevationPanel, TelemetryPanel, TrackPanel
+    from hud_settings_dialog import HudSettingsDialog
 
 # 尝试导入numpy用于错误处理
 try:
@@ -137,6 +144,13 @@ class VideoEditorApp:
         self.telemetry_resize_margin = 16
         self.display_frame_rect = None  # (x0, y0, w, h) in canvas px
         
+        # HUD Panels
+        self.hud_panels = {
+            'elevation': ElevationPanel(),
+            'telemetry': TelemetryPanel(),
+            'track': TrackPanel()
+        }
+
         # 创建GUI
         self.create_menu()
         self.create_toolbar()
@@ -461,6 +475,22 @@ class VideoEditorApp:
         ttk.Checkbutton(audio_frame, text="移除原声(导出)", variable=self.remove_original_audio_var).pack(side=tk.LEFT, padx=8)
         self.audio_file_label = ttk.Label(audio_frame, text="未选择音轨")
         self.audio_file_label.pack(side=tk.LEFT, padx=8)
+        
+        # HUD Settings
+        hud_frame = ttk.LabelFrame(parent, text="HUD设置", padding=5)
+        hud_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(hud_frame, text="打开配置...", command=self.open_hud_settings).pack(side=tk.LEFT, padx=5)
+        
+        # Export Settings
+        export_frame = ttk.LabelFrame(parent, text="导出设置", padding=5)
+        export_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(export_frame, text="质量/大小:").pack(side=tk.LEFT, padx=5)
+        self.export_quality_var = tk.StringVar(value="中 (平衡)")
+        quality_combo = ttk.Combobox(export_frame, textvariable=self.export_quality_var, 
+                                     values=["高 (大文件)", "中 (平衡)", "低 (小文件)"], 
+                                     state="readonly", width=12)
+        quality_combo.pack(side=tk.LEFT, padx=5)
         
         # Init variables
         self.align_track_points = None
@@ -2102,9 +2132,10 @@ class VideoEditorApp:
             self.update_status(f"正在导出视频: {file_path}...")
             
             # 启动导出线程
-            threading.Thread(target=self._export_video_worker, args=(file_path,), daemon=True).start()
+            quality_mode = self.export_quality_var.get()
+            threading.Thread(target=self._export_video_worker, args=(file_path, quality_mode), daemon=True).start()
 
-    def _export_video_worker(self, output_path):
+    def _export_video_worker(self, output_path, quality_mode="中 (平衡)"):
         """视频导出工作线程"""
         try:
             cap = cv2.VideoCapture(self.video_path)
@@ -2162,16 +2193,25 @@ class VideoEditorApp:
             
             # 合并音频
             if has_ffmpeg: 
-                self.root.after(0, self.update_status, "正在合并音频...")
+                self.root.after(0, self.update_status, "正在合并音频并优化视频大小...")
                 try:
+                    # Determine quality settings (CRF: Lower is better quality/larger size)
+                    crf = 23 # Default (Medium)
+                    if "高" in quality_mode: crf = 18
+                    elif "低" in quality_mode: crf = 28
+                    
+                    # Use libx264 for re-encoding to reduce size significantly compared to raw copy
+                    # preset medium is a good balance of speed and compression
+                    video_args = ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+
                     ext_audio = self.external_audio_path if self.external_audio_path and os.path.exists(self.external_audio_path) else None
                     remove_orig = bool(self.remove_original_audio_var.get())
                     if ext_audio and remove_orig:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
                             '-i', temp_video_path,
-                            '-i', ext_audio,
-                            '-c:v', 'copy',
+                            '-i', ext_audio
+                        ] + video_args + [
                             '-c:a', 'aac',
                             '-map', '0:v:0',
                             '-map', '1:a:0',
@@ -2185,16 +2225,16 @@ class VideoEditorApp:
                             '-i', ext_audio,
                             '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]',
                             '-map', '0:v:0',
-                            '-map', '[aout]',
-                            '-c:v', 'copy',
+                            '-map', '[aout]'
+                        ] + video_args + [
                             '-c:a', 'aac',
                             output_path
                         ]
                     elif not ext_audio and remove_orig:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
-                            '-i', temp_video_path,
-                            '-c:v', 'copy',
+                            '-i', temp_video_path
+                        ] + video_args + [
                             '-an',
                             output_path
                         ]
@@ -2202,8 +2242,8 @@ class VideoEditorApp:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
                             '-i', temp_video_path,
-                            '-i', self.video_path,
-                            '-c:v', 'copy',
+                            '-i', self.video_path
+                        ] + video_args + [
                             '-c:a', 'aac',
                             '-map', '0:v:0',
                             '-map', '1:a:0',
@@ -2584,6 +2624,10 @@ class VideoEditorApp:
         except Exception as e:
             print(f"Error displaying frame: {e}")
     
+    def open_hud_settings(self):
+        """打开HUD设置对话框"""
+        HudSettingsDialog(self.root, self.hud_panels, on_apply_callback=self.save_hud_config)
+
     def save_hud_config(self):
         """保存HUD配置到文件"""
         config = {}
@@ -2592,6 +2636,11 @@ class VideoEditorApp:
         
         if hasattr(self, 'ele_profile_rect_rel'):
              config['ele_profile_rect_rel'] = self.ele_profile_rect_rel
+        
+        # Save HUD panels config
+        config['hud_panels'] = {}
+        for name, panel in self.hud_panels.items():
+            config['hud_panels'][name] = panel.config
              
         try:
             config_path = os.path.join(os.getcwd(), 'hud_config.json')
@@ -2615,6 +2664,18 @@ class VideoEditorApp:
                 
             if 'ele_profile_rect_rel' in config:
                 self.ele_profile_rect_rel = config['ele_profile_rect_rel']
+            
+            if 'hud_panels' in config:
+                for name, panel_config in config['hud_panels'].items():
+                    if name in self.hud_panels:
+                        # Convert lists back to tuples for colors if needed (json loads tuples as lists)
+                        # The update_config might need to handle this, or we handle it here.
+                        # Since we use update_config, let's assume it handles it or we trust python's loose typing for colors in cv2 (it accepts lists usually)
+                        # However, for hashability or strict types, tuples are better.
+                        # Let's do a quick recursive conversion if keys end with 'color' or values are lists of numbers?
+                        # For now, cv2 usually accepts lists for colors.
+                        self.hud_panels[name].update_config(panel_config)
+                        
         except Exception as e:
             print(f"Failed to load HUD config: {e}")
 
@@ -2743,15 +2804,46 @@ class VideoEditorApp:
         speed, hr, lat, lon = self.get_data_at_time(current_seconds)
         h, w = frame.shape[:2]
         
-        # 1. 绘制轨迹 (局部跟随视角)
-        self._draw_local_track_view(frame, current_seconds)
+        # --- 1. Draw Track Panel ---
+        # Get smoothed state
+        smooth_state = self._get_smoothed_state(current_seconds + self.gpx_offset)
+        
+        track_context = {
+            'gpx_data': self.gpx_data,
+            'current_seconds': current_seconds,
+            'gpx_offset': self.gpx_offset,
+            'smooth_lats': getattr(self, 'smooth_lats', None),
+            'smooth_lons': getattr(self, 'smooth_lons', None),
+            'last_idx': getattr(self, '_last_idx', 0),
+            'current_state': smooth_state,
+            # Pass rect if configured? For now using default dynamic logic in TrackPanel unless overridden
+        }
+        self.hud_panels['track'].draw(frame, track_context)
 
-        # 2. 绘制浮动遥测面板（速度/海拔/坡度）
-        if hasattr(self, '_draw_telemetry_panel'):
-            self._draw_telemetry_panel(frame, current_seconds, speed)
+        # --- 2. Draw Telemetry Panel ---
+        ele, grade = self._get_ele_grade_at_time(current_seconds)
+        telemetry_rect = self._get_telemetry_rect_px(w, h)
+        
+        telemetry_context = {
+            'rect': telemetry_rect,
+            'current_seconds': current_seconds,
+            'speed': speed,
+            'ele': ele,
+            'grade': grade
+        }
+        self.hud_panels['telemetry'].draw(frame, telemetry_context)
             
-        # 3. 绘制高程曲线 HUD
-        self._draw_elevation_profile(frame, current_seconds)
+        # --- 3. Draw Elevation Panel ---
+        ele_rect = self._get_ele_profile_rect_px(w, h)
+        ele_context = {
+            'rect': ele_rect,
+            'current_seconds': current_seconds,
+            'gpx_data': self.gpx_data,
+            'video_duration': self.video_info.get('duration', 0),
+            'gpx_offset': self.gpx_offset,
+            'ele': ele
+        }
+        self.hud_panels['elevation'].draw(frame, ele_context)
 
         # 4. 显示调试信息 (始终显示在左上角)
         debug_y = 40
@@ -2782,336 +2874,6 @@ class VideoEditorApp:
                 cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 debug_y += 25
 
-    def _draw_elevation_profile(self, frame, current_seconds):
-        """绘制高程曲线 HUD"""
-        if not self.gpx_data or 'segments' not in self.gpx_data:
-            return
-
-        video_duration = self.video_info.get('duration', 0)
-        if video_duration <= 0:
-            return
-
-        gpx_offset = getattr(self, 'gpx_offset', 0.0)
-        h, w = frame.shape[:2]
-        
-        # 获取动态布局
-        x_start, y_start, panel_w, panel_h = self._get_ele_profile_rect_px(w, h)
-
-        
-        if panel_w < 50 or panel_h < 20:
-            return
-        
-        # 检查缓存 (增加版本号 v2 以强制刷新缓存)
-        cache_key = (id(self.gpx_data), gpx_offset, video_duration, panel_w, panel_h, 'v2')
-        
-        if not hasattr(self, '_ele_profile_cache') or self._ele_profile_cache.get('key') != cache_key:
-            # 生成缓存图像
-            # 白色背景 (255, 255, 255)
-            overlay_bgr = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
-            overlay_alpha = np.zeros((panel_h, panel_w), dtype=np.float32)
-            
-            # 背景半透明 (白色磨砂效果，提高不透明度以防看不清)
-            overlay_alpha[:] = 0.4 
-            
-            segments = self.gpx_data['segments']
-            start_t = gpx_offset
-            end_t = gpx_offset + video_duration
-            
-            # 收集点 (相对时间, 高度)
-            raw_pts = [] 
-            min_ele = float('inf')
-            max_ele = float('-inf')
-            
-            for s in segments:
-                t1, t2 = s['start'], s['end']
-                e1, e2 = s['ele_start'], s['ele_end']
-                
-                # 完全在左边
-                if t2 < start_t:
-                    continue
-                # 完全在右边
-                if t1 > end_t:
-                    break
-                    
-                # 处理交集
-                # 起点插值
-                if t1 < start_t <= t2:
-                    ratio = (start_t - t1) / (t2 - t1)
-                    e_start = e1 + (e2 - e1) * ratio
-                    raw_pts.append((0.0, e_start))
-                    min_ele = min(min_ele, e_start)
-                    max_ele = max(max_ele, e_start)
-                
-                # 段内点
-                if t1 >= start_t:
-                    rel_t = t1 - start_t
-                    raw_pts.append((rel_t, e1))
-                    min_ele = min(min_ele, e1)
-                    max_ele = max(max_ele, e1)
-                    
-                # 终点插值
-                if t1 <= end_t < t2:
-                    ratio = (end_t - t1) / (t2 - t1)
-                    e_end = e1 + (e2 - e1) * ratio
-                    raw_pts.append((video_duration, e_end))
-                    min_ele = min(min_ele, e_end)
-                    max_ele = max(max_ele, e_end)
-                elif t2 <= end_t:
-                    rel_t = t2 - start_t
-                    raw_pts.append((rel_t, e2))
-                    min_ele = min(min_ele, e2)
-                    max_ele = max(max_ele, e2)
-
-            if not raw_pts:
-                self._ele_profile_cache = {'key': cache_key, 'valid': False}
-                return
-
-            # 归一化并绘图
-            ele_range = max(10.0, max_ele - min_ele)
-            
-            pts_px = []
-            for t, ele in raw_pts:
-                px = int((t / video_duration) * panel_w)
-                norm_h = (ele - min_ele) / ele_range
-                py = int(panel_h - 10 - norm_h * (panel_h - 20))
-                pts_px.append([px, py])
-            
-            pts_px = np.array(pts_px, np.int32)
-            
-            if len(pts_px) > 1:
-                # 构造闭合多边形用于填充
-                poly_pts = pts_px.tolist()
-                poly_pts.append([pts_px[-1][0], panel_h]) 
-                poly_pts.append([pts_px[0][0], panel_h])   
-                
-                poly_pts = np.array(poly_pts, np.int32)
-                poly_pts = poly_pts.reshape((-1, 1, 2))
-                
-                # 绘制填充 (浅灰色)
-                cv2.fillPoly(overlay_bgr, [poly_pts], (220, 220, 220))
-                
-                # 填充区域不透明度增加
-                mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
-                cv2.fillPoly(mask, [poly_pts], 255)
-                overlay_alpha[mask > 0] = 0.5
-                
-                # 绘制线条 (深灰色)
-                cv2.polylines(overlay_bgr, [pts_px.reshape((-1, 1, 2))], False, (60, 60, 60), 2, cv2.LINE_AA)
-                
-                # 线条部分设为不透明 (通过mask膨胀)
-                line_mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
-                cv2.polylines(line_mask, [pts_px.reshape((-1, 1, 2))], False, 255, 2)
-                overlay_alpha[line_mask > 0] = 0.8
-
-            self._ele_profile_cache = {
-                'key': cache_key,
-                'valid': True,
-                'bgr': overlay_bgr,
-                'alpha': overlay_alpha,
-                'min_ele': min_ele,
-                'max_ele': max_ele,
-                'ele_range': ele_range
-            }
-            
-        if not self._ele_profile_cache.get('valid', False):
-            return
-            
-        # 3. 混合图层
-        overlay_bgr = self._ele_profile_cache['bgr']
-        overlay_alpha = self._ele_profile_cache['alpha']
-        
-        roi = frame[y_start:y_start+panel_h, x_start:x_start+panel_w]
-        
-        alpha_3c = np.dstack([overlay_alpha] * 3)
-        blended = (overlay_bgr * alpha_3c + roi * (1.0 - alpha_3c)).astype(np.uint8)
-        frame[y_start:y_start+panel_h, x_start:x_start+panel_w] = blended
-        
-        # 4. 绘制光标
-        min_ele = self._ele_profile_cache['min_ele']
-        ele_range = self._ele_profile_cache['ele_range']
-        
-        cx = int((current_seconds / video_duration) * panel_w)
-        cx = max(0, min(cx, panel_w - 1))
-        
-        # 垂直线
-        cv2.line(frame, (x_start + cx, y_start), (x_start + cx, y_start + panel_h), (80, 80, 80), 1)
-        
-        # 当前点
-        ele, _ = self._get_ele_grade_at_time(current_seconds)
-        if ele is not None:
-            norm_h = (ele - min_ele) / ele_range
-            cy = int(panel_h - 10 - norm_h * (panel_h - 20))
-            cy = max(0, min(cy, panel_h - 1))
-            
-            center = (x_start + cx, y_start + cy)
-            cv2.circle(frame, center, 4, (0, 0, 255), -1)
-            cv2.circle(frame, center, 5, (80, 80, 80), 1)
-            
-            text = f"{ele:.0f}m"
-            cv2.putText(frame, text, (x_start + cx + 8, y_start + cy), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-            
-            cv2.putText(frame, "Elevation", (x_start + 5, y_start + 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1, cv2.LINE_AA)
-                    
-    def _draw_local_track_view(self, frame, current_seconds):
-        """绘制局部跟随视角轨迹"""
-        if not self.gpx_data or 'smoothed_segments' not in self.gpx_data:
-            return
-
-        # 获取当前状态
-        # 1. 插值获取当前平滑后的 lat, lon, heading
-        t = current_seconds + self.gpx_offset
-        state = self._get_smoothed_state(t)
-        if not state:
-            return
-            
-        cur_lat, cur_lon, cur_heading = state
-        
-        # 参数设置
-        h, w = frame.shape[:2]
-        # 动态调整视图大小
-        view_size = min(int(w * 0.3), int(h * 0.4))
-        view_size = max(150, min(view_size, 300))
-        
-        scale = 1.0      # 缩放比例 (像素/米) - 300米高度大约对应 0.5-1.0
-        # 300m 高度，假设垂直FOV 60度 -> 地面可见高度 ~346m
-        # 如果视图高度200px -> 346m -> scale = 0.58 px/m
-        scale = view_size / 350.0 
-        
-        cam_behind_m = 100.0 # 摄像机在后方100米
-        
-        # 创建透明图层
-        overlay = np.zeros((view_size, view_size, 4), dtype=np.uint8)
-        
-        # 绘图中心 (摄像机位置)
-        # 调整摄像机位置到视图下方，以便看到前方更多路况
-        cx, cy = view_size // 2, view_size - 30
-        
-        # 坐标转换函数: 世界坐标(米) -> 屏幕坐标(像素)
-        # 1. 以摄像机为原点 (当前点前100米) -> 世界坐标
-        # 2. 旋转 (heading向上)
-        # 3. 缩放 + 平移
-        
-        # 预先筛选附近的点 (比如前后1000米范围)
-        # 简单起见，遍历所有点（优化：可以使用空间索引或时间索引）
-        # 这里使用时间窗口优化：前后 120秒
-        
-        segs = self.gpx_data['smoothed_segments']
-        
-        # 找到当前时间对应的索引附近的点
-        # 简单遍历优化：只取当前时间前后N个点
-        # 假设1秒1个点，取前后300个点
-        
-        points_to_draw = []
-        
-        # 旋转矩阵 (逆时针旋转 -heading + 90? No, heading is usually 0=North, 90=East)
-        # 我们希望 Heading 指向 屏幕上方 (-Y)
-        # 原始 Heading: 0=N, 90=E. 
-        # 屏幕坐标: 0度=右, 90度=下 (通常数学定义)
-        # 让我们使用标准变换：
-        # dx, dy 是相对于当前点的墨卡托投影距离 (米)
-        # 旋转角度 theta = -heading (把当前方向转到正北/正上)
-        # 实际上我们希望 Heading 对应屏幕 UP (-y)
-        
-        rad_heading = math.radians(cur_heading)
-        cos_h = math.cos(rad_heading)
-        sin_h = math.sin(rad_heading)
-        
-        # 摄像机位置 (相对于当前点): 位于后方100米
-        # 也就是说，摄像机坐标 = 当前点坐标 - 100m * 方向向量
-        # 但我们是以摄像机为中心绘图。
-        # 所以当前点在摄像机坐标系中的位置是 (0, 100) (假设Y轴向前)
-        
-        # 使用numpy加速计算
-        # 1. 确定索引范围
-        start_idx = max(0, self._last_idx - 300)
-        end_idx = min(len(segs), self._last_idx + 300)
-        
-        if start_idx >= end_idx:
-            return
-
-        # 检查是否有缓存的numpy数组
-        if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
-            lats = self.smooth_lats[start_idx:end_idx]
-            lons = self.smooth_lons[start_idx:end_idx]
-        else:
-            # 尝试重新生成平滑数据以获取缓存 (Lazy Init)
-            self._smooth_gpx_data()
-            if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
-                lats = self.smooth_lats[start_idx:end_idx]
-                lons = self.smooth_lons[start_idx:end_idx]
-            else:
-                # 回退到列表推导
-                lats = np.array([s['lat'] for s in segs[start_idx:end_idx]])
-                lons = np.array([s['lon'] for s in segs[start_idx:end_idx]])
-            
-        # 向量化计算
-        # 1. 相对距离 (米)
-        dys = (lats - cur_lat) * 111320
-        dxs = (lons - cur_lon) * 111320 * math.cos(math.radians(cur_lat))
-        
-        # 2. 旋转
-        # Local Forward (Y') = dy * cos(h) + dx * sin(h)
-        # Local Right (X') = dx * cos(h) - dy * sin(h)
-        local_ys = dys * cos_h + dxs * sin_h
-        local_xs = dxs * cos_h - dys * sin_h
-        
-        # 3. 转换为屏幕坐标
-        sxs = cx + local_xs * scale
-        sys = cy - (local_ys + cam_behind_m) * scale
-        
-        # 4. 过滤屏幕外的点 (可选优化)
-        # margin = 50
-        # mask = (sxs >= -margin) & (sxs < view_size + margin) & (sys >= -margin) & (sys < view_size + margin)
-        # sxs = sxs[mask]
-        # sys = sys[mask]
-        
-        # 转换并堆叠
-        pts_screen = np.stack((sxs, sys), axis=1).astype(np.int32)
-
-        
-        # 绘制轨迹
-        if len(pts_screen) > 1:
-            cv2.polylines(overlay, [pts_screen], False, (0, 255, 0, 200), 2, cv2.LINE_AA)
-            
-        # 绘制当前点 (实心圆)
-        # 当前点在 Local (0,0)
-        curr_sx = int(cx)
-        curr_sy = int(cy - cam_behind_m * scale)
-        cv2.circle(overlay, (curr_sx, curr_sy), 5, (0, 0, 255, 255), -1, cv2.LINE_AA)
-        cv2.circle(overlay, (curr_sx, curr_sy), 7, (255, 255, 255, 255), 1, cv2.LINE_AA)
-        
-        # 叠加到 Frame
-        h, w = frame.shape[:2]
-        x_offset = w - view_size - 20
-        y_offset = 20
-        
-        roi = frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size]
-        
-        # 简单 Alpha 混合 (使用整数运算优化)
-        # 假设 overlay 是 BGRA
-        
-        # 分离通道
-        ov_bgr = overlay[:, :, :3].astype(np.int32)
-        ov_alpha = overlay[:, :, 3].astype(np.int32)[:, :, np.newaxis]
-        
-        roi_int = roi.astype(np.int32)
-        
-        # 混合: (src * alpha + dst * (255 - alpha)) / 255
-        # 使用位移优化除法 ( >> 8 ) 近似 / 256, 或者直接 / 255
-        # 为了准确性使用 / 255
-        
-        blended = (ov_bgr * ov_alpha + roi_int * (255 - ov_alpha)) // 255
-        blended = blended.astype(np.uint8)
-        
-        frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size] = blended
-        
-        # 画个边框
-        cv2.rectangle(frame, (x_offset, y_offset), (x_offset+view_size, y_offset+view_size), (255, 255, 255), 1)
-        cv2.putText(frame, "Follow Cam", (x_offset + 5, y_offset + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-    
     def _get_ele_grade_at_time(self, current_seconds):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
             return None, None
@@ -3155,153 +2917,6 @@ class VideoEditorApp:
                 grade = 0.0
         return ele, grade
     
-    def _draw_hex_stat(self, frame, center, radius, value, label):
-        """绘制六边形状态显示 (HUD组件)"""
-        cx, cy = center
-        # 生成六边形顶点 (尖顶朝上)
-        pts = []
-        for i in range(6):
-            angle_deg = 60 * i + 30
-            angle_rad = math.radians(angle_deg)
-            px = int(cx + radius * math.cos(angle_rad))
-            py = int(cy + radius * math.sin(angle_rad))
-            pts.append([px, py])
-            
-        pts = np.array(pts, np.int32).reshape((-1, 1, 2))
-        
-        # 1. 半透明填充 (浅灰色背景)
-        overlay = frame.copy()
-        cv2.fillPoly(overlay, [pts], (200, 200, 200)) 
-        # 混合模式: overlay * 0.3 + frame * 0.7
-        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
-        
-        # 2. 边框 (白色)
-        cv2.polylines(frame, [pts], True, (255, 255, 255), 2, cv2.LINE_AA)
-        
-        # 3. 文字
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        
-        # 数值 (居中)
-        # 动态字体大小 (调小，从 /30 改为 /45，避免过大)
-        font_scale_val = radius / 45.0 
-        if font_scale_val < 0.35: font_scale_val = 0.35
-        
-        thickness = max(1, int(font_scale_val * 2))
-        (tw, th), base = cv2.getTextSize(str(value), font, font_scale_val, thickness)
-        cv2.putText(frame, str(value), (int(cx - tw/2), int(cy + th/2)), font, font_scale_val, (255, 255, 255), thickness, cv2.LINE_AA)
-        
-        # 标签 (下方)
-        font_scale_lbl = radius / 50.0
-        if font_scale_lbl < 0.3: font_scale_lbl = 0.3
-        
-        (tw2, th2), base2 = cv2.getTextSize(label, font, font_scale_lbl, 1)
-        cv2.putText(frame, label, (int(cx - tw2/2), int(cy + radius*0.6)), font, font_scale_lbl, (220, 220, 220), 1, cv2.LINE_AA)
-
-    def _draw_telemetry_panel(self, frame, current_seconds, speed):
-        """绘制未来派HUD面板"""
-        h, w = frame.shape[:2]
-        x, y, ww, hh = self._get_telemetry_rect_px(w, h)
-        
-        if ww < 50 or hh < 50:
-            return
-
-        # 获取数据
-        ele, grade = self._get_ele_grade_at_time(current_seconds)
-        if ele is None: ele = 0.0
-        if grade is None: grade = 0.0
-        
-        # --- 布局计算 ---
-        # 垂直分割点: 上60%显示速度，下40%显示六边形
-        split_y = y + int(hh * 0.6)
-        
-        # --- 1. 速度区域 (上半部分) ---
-        speed_center_y = y + int((split_y - y) * 0.4)
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        # 字体大小根据宽度动态调整 (改为更小，约原来0.6倍)
-        font_scale_speed = min(ww, hh) / 100.0 * 0.9
-        speed_str = f"{int(speed)}"
-        (tw, th), base = cv2.getTextSize(speed_str, font, font_scale_speed, 3)
-        
-        # 速度数值位置 (居中偏右)
-        tx = x + ww // 2 - tw // 2 + int(ww * 0.1) 
-        ty = speed_center_y + th // 2
-        
-        # 阴影/轮廓 (增加厚度以实现粗体效果)
-        cv2.putText(frame, speed_str, (tx+2, ty+2), font, font_scale_speed, (0, 0, 0), 6, cv2.LINE_AA)
-        cv2.putText(frame, speed_str, (tx, ty), font, font_scale_speed, (255, 255, 255), 3, cv2.LINE_AA)
-        
-        # 单位 KM/H (在速度左侧)
-        unit_str = "KM/H"
-        font_scale_unit = font_scale_speed * 0.3
-        (uw, uh), _ = cv2.getTextSize(unit_str, font, font_scale_unit, 1)
-        ux = tx - uw - 15
-        uy = ty
-        cv2.putText(frame, unit_str, (ux+1, uy+1), font, font_scale_unit, (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(frame, unit_str, (ux, uy), font, font_scale_unit, (200, 200, 200), 1, cv2.LINE_AA)
-        
-        # 装饰性线条 (左上角)
-        line_color = (200, 200, 200)
-        cv2.line(frame, (ux - 10, uy - uh), (ux - 10, uy + 5), line_color, 2, cv2.LINE_AA)
-        cv2.line(frame, (ux - 10, uy - uh), (ux + 20, uy - uh), line_color, 2, cv2.LINE_AA)
-        
-        # --- 速度条 (下方) ---
-        bar_y_start = ty + 15
-        bar_area_h = split_y - bar_y_start - 5
-        if bar_area_h < 10: bar_area_h = 10
-        
-        bar_area_w = int(ww * 0.9)
-        bar_x_start = x + (ww - bar_area_w) // 2
-        
-        num_bars = 20
-        gap = 3
-        bar_w = (bar_area_w - (num_bars - 1) * gap) / num_bars
-        
-        max_speed_disp = 60.0 # 假设最大显示速度60
-        ratio = min(1.0, speed / max_speed_disp)
-        active_bars = int(num_bars * ratio)
-        
-        # 速度条外框装饰
-        # 左括号
-        cv2.line(frame, (bar_x_start - 5, bar_y_start), (bar_x_start - 5, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
-        cv2.line(frame, (bar_x_start - 5, bar_y_start + bar_area_h), (bar_x_start + 10, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
-        # 右括号
-        cv2.line(frame, (bar_x_start + bar_area_w + 5, bar_y_start), (bar_x_start + bar_area_w + 5, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
-        cv2.line(frame, (bar_x_start + bar_area_w + 5, bar_y_start + bar_area_h), (bar_x_start + bar_area_w - 10, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
-
-        for i in range(num_bars):
-            bx = int(bar_x_start + i * (bar_w + gap))
-            by = bar_y_start
-            
-            pt1 = (bx, by)
-            pt2 = (int(bx + bar_w), by + bar_area_h)
-            
-            if i < active_bars:
-                # 激活状态 (白色填充)
-                cv2.rectangle(frame, pt1, pt2, (255, 255, 255), -1)
-            else:
-                # 未激活状态 (灰色空心)
-                cv2.rectangle(frame, pt1, pt2, (100, 100, 100), 1)
-
-        # --- 2. 下半部分：六边形 (海拔 & 坡度) ---
-        hex_y_center = split_y + (y + hh - split_y) // 2
-        hex_radius = int(min((y + hh - split_y) * 0.45, ww * 0.22))
-        
-        # 计算水平贴合距离
-        # 六边形宽度 = 2 * radius * cos(30) = sqrt(3) * radius
-        # 贴合距离 = sqrt(3) * radius
-        hex_dist = int(hex_radius * math.sqrt(3))
-        
-        # 两个六边形中心
-        hex1_cx = x + ww // 2 - hex_dist // 2 + 1  # +1 确保覆盖缝隙
-        hex2_cx = x + ww // 2 + hex_dist // 2 - 1
-        
-        # 绘制六边形 1 (海拔)
-        self._draw_hex_stat(frame, (hex1_cx, hex_y_center), hex_radius, f"{int(ele)}", "ALT m")
-        
-        # 绘制六边形 2 (坡度)
-        self._draw_hex_stat(frame, (hex2_cx, hex_y_center), hex_radius, f"{grade:.1f}", "SLOPE %")
-
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
         duration = self.video_info.get('duration', 0)

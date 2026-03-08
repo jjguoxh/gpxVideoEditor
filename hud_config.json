@@ -10,5 +10,138 @@
         0.7241379310344828,
         0.40445402298850575,
         0.26340996168582376
-    ]
+    ],
+    "hud_panels": {
+        "elevation": {
+            "bg_color": [
+                192,
+                192,
+                192
+            ],
+            "text_color": [
+                255,
+                255,
+                255
+            ],
+            "font_scale": 1.0,
+            "line_thickness": 2,
+            "visible": true,
+            "bg_alpha": 0.4,
+            "fill_color": [
+                220,
+                220,
+                220
+            ],
+            "line_color": [
+                60,
+                60,
+                60
+            ],
+            "cursor_color": [
+                80,
+                80,
+                80
+            ],
+            "point_color": [
+                0,
+                0,
+                255
+            ]
+        },
+        "telemetry": {
+            "bg_color": [
+                200,
+                200,
+                200
+            ],
+            "text_color": [
+                255,
+                255,
+                255
+            ],
+            "font_scale": 1.0,
+            "line_thickness": 2,
+            "visible": true,
+            "line_color": [
+                255,
+                255,
+                255
+            ],
+            "text_color_val": [
+                255,
+                255,
+                255
+            ],
+            "text_color_lbl": [
+                220,
+                220,
+                220
+            ],
+            "shadow_color": [
+                0,
+                0,
+                0
+            ],
+            "speed_color": [
+                192,
+                192,
+                192
+            ],
+            "bar_color_active": [
+                255,
+                255,
+                255
+            ],
+            "bar_color_inactive": [
+                100,
+                100,
+                100
+            ],
+            "max_speed": 60.0
+        },
+        "track": {
+            "bg_color": [
+                0,
+                0,
+                0,
+                0
+            ],
+            "text_color": [
+                255,
+                255,
+                255
+            ],
+            "font_scale": 1.0,
+            "line_thickness": 2,
+            "visible": true,
+            "track_color": [
+                0,
+                255,
+                0,
+                200
+            ],
+            "curr_point_color": [
+                0,
+                0,
+                255,
+                255
+            ],
+            "curr_point_outline": [
+                255,
+                255,
+                255,
+                255
+            ],
+            "border_color": [
+                255,
+                255,
+                255
+            ],
+            "view_size_ratio": 0.3,
+            "cam_behind_m": 100.0,
+            "scale_factor": 350.0,
+            "margin_top": 20,
+            "margin_right": 20
+        }
+    }
 }
