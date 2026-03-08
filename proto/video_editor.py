@@ -2707,7 +2707,12 @@ class VideoEditorApp:
     
     def open_hud_settings(self):
         """打开HUD设置对话框"""
-        HudSettingsDialog(self.root, self.hud_panels, on_apply_callback=self.save_hud_config)
+        HudSettingsDialog(self.root, self.hud_panels, on_apply_callback=self.apply_hud_settings)
+
+    def apply_hud_settings(self):
+        self.save_hud_config()
+        if self.cap is not None and not self.playing:
+            self.seek_to_frame(self.current_frame_pos)
 
     def save_hud_config(self):
         """保存HUD配置到文件"""
@@ -2817,8 +2822,9 @@ class VideoEditorApp:
             return
             
         # 1. 检查高程HUD (绘制在最上层，优先检查)
+        ele_visible = self.hud_panels.get('elevation').config.get('visible', True)
         ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
-        if ex <= mx <= ex+ew and ey <= my <= ey+eh:
+        if ele_visible and ex <= mx <= ex+ew and ey <= my <= ey+eh:
             # 检查右下角缩放区域
             if (ex+ew - mx) <= self.telemetry_resize_margin and (ey+eh - my) <= self.telemetry_resize_margin:
                 self.ele_profile_resizing = True
@@ -2828,8 +2834,9 @@ class VideoEditorApp:
             return
 
         # 2. 检查遥测面板
+        telemetry_visible = self.hud_panels.get('telemetry').config.get('visible', True)
         px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
-        if px <= mx <= px+pw and py <= my <= py+ph:
+        if telemetry_visible and px <= mx <= px+pw and py <= my <= py+ph:
             if (px+pw - mx) <= self.telemetry_resize_margin and (py+ph - my) <= self.telemetry_resize_margin:
                 self.telemetry_resizing = True
             else:
@@ -2838,8 +2845,9 @@ class VideoEditorApp:
             return
 
         # 3. Check Speedometer Panel
+        speedometer_visible = self.hud_panels.get('speedometer').config.get('visible', True)
         sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
-        if sx <= mx <= sx+sw and sy <= my <= sy+sh:
+        if speedometer_visible and sx <= mx <= sx+sw and sy <= my <= sy+sh:
             if (sx+sw - mx) <= self.telemetry_resize_margin and (sy+sh - my) <= self.telemetry_resize_margin:
                 self.speedometer_resizing = True
             else:

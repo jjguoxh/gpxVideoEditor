@@ -11,6 +11,7 @@ class HudSettingsDialog(tk.Toplevel):
         self.on_apply_callback = on_apply_callback
         self.current_panel_key = None
         self.entries = {}
+        self.panel_keys = []
         
         self._create_widgets()
         
@@ -26,9 +27,8 @@ class HudSettingsDialog(tk.Toplevel):
         self.panel_listbox = tk.Listbox(left_frame, width=20)
         self.panel_listbox.pack(fill=tk.BOTH, expand=True)
         self.panel_listbox.bind('<<ListboxSelect>>', self._on_panel_select)
-        
-        for key in self.hud_panels.keys():
-            self.panel_listbox.insert(tk.END, key)
+        self.panel_listbox.bind('<Button-1>', self._on_panel_click)
+        self._refresh_panel_list()
             
         # Right Panel: Properties Scrollable Frame
         right_frame = ttk.LabelFrame(main_frame, text="Properties", padding="5")
@@ -56,6 +56,49 @@ class HudSettingsDialog(tk.Toplevel):
         
         ttk.Button(btn_frame, text="Apply & Save", command=self._on_apply).pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=10)
+        if self.panel_keys:
+            self.panel_listbox.selection_set(0)
+            self.current_panel_key = self.panel_keys[0]
+            self._load_properties(self.current_panel_key)
+
+    def _format_panel_item(self, panel_key):
+        panel = self.hud_panels[panel_key]
+        visible = bool(panel.config.get('visible', True))
+        mark = "☑" if visible else "☐"
+        return f"{mark} {panel_key}"
+
+    def _refresh_panel_list(self, selected_key=None):
+        self.panel_keys = list(self.hud_panels.keys())
+        self.panel_listbox.delete(0, tk.END)
+        for key in self.panel_keys:
+            self.panel_listbox.insert(tk.END, self._format_panel_item(key))
+        if selected_key and selected_key in self.panel_keys:
+            idx = self.panel_keys.index(selected_key)
+            self.panel_listbox.selection_set(idx)
+            self.panel_listbox.activate(idx)
+
+    def _on_panel_click(self, event):
+        idx = self.panel_listbox.nearest(event.y)
+        if idx < 0 or idx >= len(self.panel_keys):
+            return "break"
+
+        panel_key = self.panel_keys[idx]
+        if self.current_panel_key and self.current_panel_key != panel_key:
+            self._save_current_panel()
+
+        self.panel_listbox.selection_clear(0, tk.END)
+        self.panel_listbox.selection_set(idx)
+        self.panel_listbox.activate(idx)
+
+        if event.x <= 24:
+            panel = self.hud_panels[panel_key]
+            visible = bool(panel.config.get('visible', True))
+            panel.update_config({'visible': not visible})
+            self._refresh_panel_list(selected_key=panel_key)
+
+        self.current_panel_key = panel_key
+        self._load_properties(panel_key)
+        return "break"
         
     def _on_panel_select(self, event):
         # Save previous if any
@@ -66,7 +109,7 @@ class HudSettingsDialog(tk.Toplevel):
         if not selection:
             return
             
-        panel_key = self.panel_listbox.get(selection[0])
+        panel_key = self.panel_keys[selection[0]]
         self.current_panel_key = panel_key
         self._load_properties(panel_key)
         
@@ -146,13 +189,9 @@ class HudSettingsDialog(tk.Toplevel):
             var.set(str(new_val))
 
     def _on_apply(self):
-        if not self.current_panel_key:
-            return
-            
-        # First save current panel changes
-        self._save_current_panel()
+        if self.current_panel_key:
+            self._save_current_panel()
         
-        # Callback to save config to disk
         if self.on_apply_callback:
             self.on_apply_callback()
             
