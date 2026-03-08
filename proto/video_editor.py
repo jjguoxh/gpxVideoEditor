@@ -442,6 +442,13 @@ class VideoEditorApp:
         time_frame.pack(fill=tk.X, padx=5)
         self.time_label = ttk.Label(time_frame, text="00:00:00 / 00:00:00", font=default_font)
         self.time_label.pack(side=tk.LEFT)
+        self.preview_seconds_var = tk.IntVar(value=0)
+        self.preview_spinbox = ttk.Spinbox(time_frame, from_=0, to=0, increment=1,
+                                           textvariable=self.preview_seconds_var, width=6,
+                                           format="%.0f", command=self.on_preview_spinbox_change)
+        self.preview_spinbox.pack(side=tk.LEFT, padx=(10, 2))
+        self.preview_spinbox.bind('<Return>', self.on_preview_spinbox_change)
+        self.preview_spinbox.bind('<FocusOut>', self.on_preview_spinbox_change)
         control_buttons_frame = ttk.Frame(time_frame)
         control_buttons_frame.pack(side=tk.LEFT, padx=20)
         ttk.Button(control_buttons_frame, text="⏮", command=self.jump_to_start, width=3).pack(side=tk.LEFT, padx=1)
@@ -507,9 +514,9 @@ class VideoEditorApp:
         self.align_time_label.pack(side=tk.LEFT, padx=2)
         
         # 微调 Spinbox
-        self.align_spinbox = ttk.Spinbox(bottom_ctrl_frame, from_=0.0, to=0.0, increment=0.1, 
+        self.align_spinbox = ttk.Spinbox(bottom_ctrl_frame, from_=0.0, to=0.0, increment=1.0,
                                          textvariable=self.align_progress_var, width=10,
-                                         format="%.2f",
+                                         format="%.0f",
                                          command=self.on_align_spinbox_change)
         self.align_spinbox.pack(side=tk.LEFT, padx=2)
         self.align_spinbox.bind('<Return>', self.on_align_spinbox_change)
@@ -3061,6 +3068,7 @@ class VideoEditorApp:
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
         duration = self.video_info.get('duration', 0)
+        self.preview_seconds_var.set(int(round(current_time)))
         self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
         
         # 更新播放头位置
@@ -3368,6 +3376,8 @@ class VideoEditorApp:
             
             # 更新进度条最大值
             self.progress_scale.config(to=self.video_info.get('duration', 100))
+            if hasattr(self, 'preview_spinbox'):
+                self.preview_spinbox.config(to=int(self.video_info.get('duration', 0)))
     
     def update_preview_label(self, text):
         """更新预览标签"""
@@ -3548,6 +3558,19 @@ class VideoEditorApp:
             # 恢复播放
             self.toggle_play()
 
+    def on_preview_spinbox_change(self, event=None):
+        if not self.video_info:
+            return
+        try:
+            target_sec = int(float(self.preview_seconds_var.get()))
+        except Exception:
+            target_sec = 0
+        duration = int(self.video_info.get('duration', 0))
+        target_sec = max(0, min(target_sec, duration))
+        self.preview_seconds_var.set(target_sec)
+        self.progress_var.set(float(target_sec))
+        self.on_progress_change(float(target_sec))
+
     def on_progress_change(self, value):
         """进度条改变事件"""
         if self.cap is None:
@@ -3562,6 +3585,7 @@ class VideoEditorApp:
             self.seek_to_frame(frame_number)
         
         duration = self.video_info.get('duration', 0)
+        self.preview_seconds_var.set(int(round(current_time)))
         self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
     
     def on_clip_select(self, event):
