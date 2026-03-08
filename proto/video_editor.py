@@ -155,6 +155,9 @@ class VideoEditorApp:
         self.root.bind(']', self.increase_offset)
         self.root.bind('{', self.decrease_offset_fine) # Shift+[
         self.root.bind('}', self.increase_offset_fine) # Shift+]
+
+        # 加载HUD配置
+        self.load_hud_config()
     
     def _get_ffprobe_cmd(self):
         """获取ffprobe命令路径"""
@@ -2091,6 +2094,9 @@ class VideoEditorApp:
         )
         
         if file_path:
+            # 保存HUD配置
+            self.save_hud_config()
+            
             # 禁用界面交互
             self.root.config(cursor="watch")
             self.update_status(f"正在导出视频: {file_path}...")
@@ -2329,6 +2335,10 @@ class VideoEditorApp:
         if not self.playing:
             # 开始播放
             self.playing = True
+            
+            # 保存HUD配置
+            self.save_hud_config()
+            
             self.play_btn['text'] = "⏸ 暂停"
             self.update_status("播放中...")
             self.start_audio_playback(self._current_time())
@@ -2543,10 +2553,66 @@ class VideoEditorApp:
         # 记录当前帧在画布的位置和大小，供鼠标拖放使用
         self.display_frame_rect = (x_center - img.width // 2, y_center - img.height // 2, img.width, img.height)
     
+    def save_hud_config(self):
+        """保存HUD配置到文件"""
+        config = {}
+        if hasattr(self, 'telemetry_rect_rel'):
+            config['telemetry_rect_rel'] = self.telemetry_rect_rel
+        
+        if hasattr(self, 'ele_profile_rect_rel'):
+             config['ele_profile_rect_rel'] = self.ele_profile_rect_rel
+             
+        try:
+            config_path = os.path.join(os.getcwd(), 'hud_config.json')
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save HUD config: {e}")
+
+    def load_hud_config(self):
+        """从文件加载HUD配置"""
+        try:
+            config_path = os.path.join(os.getcwd(), 'hud_config.json')
+            if not os.path.exists(config_path):
+                return
+                
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            if 'telemetry_rect_rel' in config:
+                self.telemetry_rect_rel = config['telemetry_rect_rel']
+                
+            if 'ele_profile_rect_rel' in config:
+                self.ele_profile_rect_rel = config['ele_profile_rect_rel']
+        except Exception as e:
+            print(f"Failed to load HUD config: {e}")
+
     def _get_telemetry_rect_px(self, frame_w, frame_h):
         x_frac, y_frac, w_frac, h_frac = self.telemetry_rect_rel
         w = max(100, int(w_frac * frame_w))
         h = max(60, int(h_frac * frame_h))
+        x = max(0, min(int(x_frac * frame_w), frame_w - w))
+        y = max(0, min(int(y_frac * frame_h), frame_h - h))
+        return x, y, w, h
+
+    def _get_ele_profile_rect_px(self, frame_w, frame_h):
+        """获取高程HUD的像素坐标"""
+        if not hasattr(self, 'ele_profile_rect_rel'):
+            # 默认布局: 底部居中, 左右边距40, 高度100
+            margin_x = 40
+            panel_h = 100
+            panel_w = max(100, frame_w - 2 * margin_x)
+            
+            x_rel = margin_x / frame_w
+            w_rel = panel_w / frame_w
+            h_rel = panel_h / frame_h
+            y_rel = (frame_h - 20 - panel_h) / frame_h
+            
+            self.ele_profile_rect_rel = [x_rel, y_rel, w_rel, h_rel]
+
+        x_frac, y_frac, w_frac, h_frac = self.ele_profile_rect_rel
+        w = max(50, int(w_frac * frame_w))
+        h = max(30, int(h_frac * frame_h))
         x = max(0, min(int(x_frac * frame_w), frame_w - w))
         y = max(0, min(int(y_frac * frame_h), frame_h - h))
         return x, y, w, h
@@ -2558,6 +2624,19 @@ class VideoEditorApp:
         mx, my = event.x - fx, event.y - fy
         if mx < 0 or my < 0 or mx > fw or my > fh:
             return
+            
+        # 1. 检查高程HUD (绘制在最上层，优先检查)
+        ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+        if ex <= mx <= ex+ew and ey <= my <= ey+eh:
+            # 检查右下角缩放区域
+            if (ex+ew - mx) <= self.telemetry_resize_margin and (ey+eh - my) <= self.telemetry_resize_margin:
+                self.ele_profile_resizing = True
+            else:
+                self.ele_profile_dragging = True
+                self.ele_profile_drag_start = (mx - ex, my - ey)
+            return
+
+        # 2. 检查遥测面板
         px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
         if px <= mx <= px+pw and py <= my <= py+ph:
             if (px+pw - mx) <= self.telemetry_resize_margin and (py+ph - my) <= self.telemetry_resize_margin:
@@ -2569,22 +2648,47 @@ class VideoEditorApp:
     def on_video_panel_drag(self, event):
         if not self.display_frame_rect:
             return
-        if not (self.telemetry_dragging or self.telemetry_resizing):
+            
+        # 检查是否有任何面板正在被操作
+        is_ele_drag = getattr(self, 'ele_profile_dragging', False)
+        is_ele_resize = getattr(self, 'ele_profile_resizing', False)
+        
+        if not (self.telemetry_dragging or self.telemetry_resizing or is_ele_drag or is_ele_resize):
             return
+            
         fx, fy, fw, fh = self.display_frame_rect
         mx, my = event.x - fx, event.y - fy
-        px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
+        
+        # 遥测面板操作
         if self.telemetry_dragging and self.telemetry_drag_start:
+            px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
             dx, dy = self.telemetry_drag_start
             new_x = max(0, min(mx - dx, fw - pw))
             new_y = max(0, min(my - dy, fh - ph))
             self.telemetry_rect_rel[0] = new_x / fw
             self.telemetry_rect_rel[1] = new_y / fh
         elif self.telemetry_resizing:
+            px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
             new_w = max(100, min(max(10, mx - px), fw - px))
             new_h = max(60, min(max(10, my - py), fh - py))
             self.telemetry_rect_rel[2] = new_w / fw
             self.telemetry_rect_rel[3] = new_h / fh
+            
+        # 高程HUD操作
+        elif is_ele_drag and hasattr(self, 'ele_profile_drag_start') and self.ele_profile_drag_start:
+            ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+            dx, dy = self.ele_profile_drag_start
+            new_x = max(0, min(mx - dx, fw - ew))
+            new_y = max(0, min(my - dy, fh - eh))
+            self.ele_profile_rect_rel[0] = new_x / fw
+            self.ele_profile_rect_rel[1] = new_y / fh
+        elif is_ele_resize:
+            ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+            new_w = max(50, min(max(10, mx - ex), fw - ex))
+            new_h = max(30, min(max(10, my - ey), fh - ey))
+            self.ele_profile_rect_rel[2] = new_w / fw
+            self.ele_profile_rect_rel[3] = new_h / fh
+            
         if not self.playing and self.cap is not None:
             self.seek_to_frame(self.current_frame_pos)
     
@@ -2592,6 +2696,9 @@ class VideoEditorApp:
         self.telemetry_dragging = False
         self.telemetry_resizing = False
         self.telemetry_drag_start = None
+        self.ele_profile_dragging = False
+        self.ele_profile_resizing = False
+        self.ele_profile_drag_start = None
     
     def _draw_overlay_on_frame(self, frame, current_seconds):
         """在帧上绘制GPX叠加层"""
@@ -2607,6 +2714,9 @@ class VideoEditorApp:
         # 2. 绘制浮动遥测面板（速度/海拔/坡度）
         if hasattr(self, '_draw_telemetry_panel'):
             self._draw_telemetry_panel(frame, current_seconds, speed)
+            
+        # 3. 绘制高程曲线 HUD
+        self._draw_elevation_profile(frame, current_seconds)
 
         # 4. 显示调试信息 (始终显示在左上角)
         debug_y = 40
@@ -2637,6 +2747,175 @@ class VideoEditorApp:
                 cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 debug_y += 25
 
+    def _draw_elevation_profile(self, frame, current_seconds):
+        """绘制高程曲线 HUD"""
+        if not self.gpx_data or 'segments' not in self.gpx_data:
+            return
+
+        video_duration = self.video_info.get('duration', 0)
+        if video_duration <= 0:
+            return
+
+        gpx_offset = getattr(self, 'gpx_offset', 0.0)
+        h, w = frame.shape[:2]
+        
+        # 获取动态布局
+        x_start, y_start, panel_w, panel_h = self._get_ele_profile_rect_px(w, h)
+        
+        if panel_w < 50 or panel_h < 20:
+            return
+        
+        # 检查缓存
+        cache_key = (id(self.gpx_data), gpx_offset, video_duration, panel_w, panel_h)
+        
+        if not hasattr(self, '_ele_profile_cache') or self._ele_profile_cache.get('key') != cache_key:
+            # 生成缓存图像
+            overlay_bgr = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+            overlay_alpha = np.zeros((panel_h, panel_w), dtype=np.float32)
+            
+            # 背景半透明
+            overlay_alpha[:] = 0.3 
+            
+            segments = self.gpx_data['segments']
+            start_t = gpx_offset
+            end_t = gpx_offset + video_duration
+            
+            # 收集点 (相对时间, 高度)
+            raw_pts = [] 
+            min_ele = float('inf')
+            max_ele = float('-inf')
+            
+            for s in segments:
+                t1, t2 = s['start'], s['end']
+                e1, e2 = s['ele_start'], s['ele_end']
+                
+                # 完全在左边
+                if t2 < start_t:
+                    continue
+                # 完全在右边
+                if t1 > end_t:
+                    break
+                    
+                # 处理交集
+                # 起点插值
+                if t1 < start_t <= t2:
+                    ratio = (start_t - t1) / (t2 - t1)
+                    e_start = e1 + (e2 - e1) * ratio
+                    raw_pts.append((0.0, e_start))
+                    min_ele = min(min_ele, e_start)
+                    max_ele = max(max_ele, e_start)
+                
+                # 段内点
+                if t1 >= start_t:
+                    rel_t = t1 - start_t
+                    raw_pts.append((rel_t, e1))
+                    min_ele = min(min_ele, e1)
+                    max_ele = max(max_ele, e1)
+                    
+                # 终点插值
+                if t1 <= end_t < t2:
+                    ratio = (end_t - t1) / (t2 - t1)
+                    e_end = e1 + (e2 - e1) * ratio
+                    raw_pts.append((video_duration, e_end))
+                    min_ele = min(min_ele, e_end)
+                    max_ele = max(max_ele, e_end)
+                elif t2 <= end_t:
+                    rel_t = t2 - start_t
+                    raw_pts.append((rel_t, e2))
+                    min_ele = min(min_ele, e2)
+                    max_ele = max(max_ele, e2)
+
+            if not raw_pts:
+                self._ele_profile_cache = {'key': cache_key, 'valid': False}
+                return
+
+            # 归一化并绘图
+            ele_range = max(10.0, max_ele - min_ele)
+            
+            pts_px = []
+            for t, ele in raw_pts:
+                px = int((t / video_duration) * panel_w)
+                norm_h = (ele - min_ele) / ele_range
+                py = int(panel_h - 10 - norm_h * (panel_h - 20))
+                pts_px.append([px, py])
+            
+            pts_px = np.array(pts_px, np.int32)
+            
+            if len(pts_px) > 1:
+                # 构造闭合多边形用于填充
+                poly_pts = pts_px.tolist()
+                poly_pts.append([pts_px[-1][0], panel_h]) 
+                poly_pts.append([pts_px[0][0], panel_h])   
+                
+                poly_pts = np.array(poly_pts, np.int32)
+                poly_pts = poly_pts.reshape((-1, 1, 2))
+                
+                # 绘制填充 (浅青色)
+                cv2.fillPoly(overlay_bgr, [poly_pts], (200, 255, 255))
+                
+                # 填充区域不透明度增加
+                mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
+                cv2.fillPoly(mask, [poly_pts], 255)
+                overlay_alpha[mask > 0] = 0.5
+                
+                # 绘制线条 (黄色)
+                cv2.polylines(overlay_bgr, [pts_px.reshape((-1, 1, 2))], False, (0, 255, 255), 2, cv2.LINE_AA)
+                
+                # 线条部分设为不透明 (通过mask膨胀)
+                line_mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
+                cv2.polylines(line_mask, [pts_px.reshape((-1, 1, 2))], False, 255, 2)
+                overlay_alpha[line_mask > 0] = 0.9
+
+            self._ele_profile_cache = {
+                'key': cache_key,
+                'valid': True,
+                'bgr': overlay_bgr,
+                'alpha': overlay_alpha,
+                'min_ele': min_ele,
+                'max_ele': max_ele,
+                'ele_range': ele_range
+            }
+            
+        if not self._ele_profile_cache.get('valid', False):
+            return
+            
+        # 3. 混合图层
+        overlay_bgr = self._ele_profile_cache['bgr']
+        overlay_alpha = self._ele_profile_cache['alpha']
+        
+        roi = frame[y_start:y_start+panel_h, x_start:x_start+panel_w]
+        
+        alpha_3c = np.dstack([overlay_alpha] * 3)
+        blended = (overlay_bgr * alpha_3c + roi * (1.0 - alpha_3c)).astype(np.uint8)
+        frame[y_start:y_start+panel_h, x_start:x_start+panel_w] = blended
+        
+        # 4. 绘制光标
+        min_ele = self._ele_profile_cache['min_ele']
+        ele_range = self._ele_profile_cache['ele_range']
+        
+        cx = int((current_seconds / video_duration) * panel_w)
+        cx = max(0, min(cx, panel_w - 1))
+        
+        # 垂直线
+        cv2.line(frame, (x_start + cx, y_start), (x_start + cx, y_start + panel_h), (255, 255, 255), 1)
+        
+        # 当前点
+        ele, _ = self._get_ele_grade_at_time(current_seconds)
+        if ele is not None:
+            norm_h = (ele - min_ele) / ele_range
+            cy = int(panel_h - 10 - norm_h * (panel_h - 20))
+            cy = max(0, min(cy, panel_h - 1))
+            
+            center = (x_start + cx, y_start + cy)
+            cv2.circle(frame, center, 4, (0, 0, 255), -1)
+            cv2.circle(frame, center, 5, (255, 255, 255), 1)
+            
+            text = f"{ele:.0f}m"
+            cv2.putText(frame, text, (x_start + cx + 8, y_start + cy), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            
+            cv2.putText(frame, "Elevation", (x_start + 5, y_start + 15), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
                     
     def _draw_local_track_view(self, frame, current_seconds):
         """绘制局部跟随视角轨迹"""
