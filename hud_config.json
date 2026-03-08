@@ -6,8 +6,8 @@
         0.22
     ],
     "ele_profile_rect_rel": [
-        0.01867816091954023,
-        0.7241379310344828,
+        0.0,
+        0.0,
         0.40445402298850575,
         0.26340996168582376
     ],
@@ -142,6 +142,46 @@
             "scale_factor": 350.0,
             "margin_top": 20,
             "margin_right": 20
+        },
+        "speedometer": {
+            "bg_color": [
+                18,
+                18,
+                18
+            ],
+            "text_color": [
+                245,
+                245,
+                245
+            ],
+            "font_scale": 1.0,
+            "line_thickness": 2,
+            "visible": true,
+            "ring_color": [
+                245,
+                245,
+                245
+            ],
+            "inactive_color": [
+                80,
+                80,
+                80
+            ],
+            "accent_color": [
+                50,
+                74,
+                244
+            ],
+            "sub_text_color": [
+                180,
+                180,
+                180
+            ],
+            "bg_alpha": 0.68,
+            "size_ratio": 0.24,
+            "margin_left": 24,
+            "margin_bottom": 140,
+            "max_speed": 60.0
         }
     }
 }

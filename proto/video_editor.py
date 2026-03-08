@@ -23,11 +23,11 @@ import json
 import re
 import signal
 try:
-    from .hud import ElevationPanel, TelemetryPanel, TrackPanel
+    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
     from .hud_settings_dialog import HudSettingsDialog
 except ImportError:
     # Fallback for running as a script
-    from hud import ElevationPanel, TelemetryPanel, TrackPanel
+    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
     from hud_settings_dialog import HudSettingsDialog
 
 # 尝试导入numpy用于错误处理
@@ -75,6 +75,54 @@ else:  # Linux
     default_font = ('WenQuanYi Micro Hei', 10)
 
 
+class ExportProgressDialog(tk.Toplevel):
+    """导出进度对话框"""
+    def __init__(self, parent, title="导出视频"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("400x150")
+        self.resizable(False, False)
+        # self.attributes('-topmost', True) # Removed to avoid blocking other windows too aggressively
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # 禁用关闭按钮
+        
+        # 居中显示
+        try:
+            x = parent.winfo_rootx() + parent.winfo_width() // 2 - 200
+            y = parent.winfo_rooty() + parent.winfo_height() // 2 - 75
+            self.geometry(f"+{x}+{y}")
+        except:
+            pass
+        
+        self.message_label = ttk.Label(self, text="正在准备...", anchor="center")
+        self.message_label.pack(fill=tk.X, padx=20, pady=(20, 10))
+        
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progressbar = ttk.Progressbar(self, variable=self.progress_var, maximum=100)
+        self.progressbar.pack(fill=tk.X, padx=20, pady=10)
+        
+        self.detail_label = ttk.Label(self, text="0%", anchor="center")
+        self.detail_label.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+    def update_progress(self, percent, message=None):
+        if percent is not None:
+            if percent < 0:
+                self.progressbar.config(mode='indeterminate')
+                self.progressbar.start(10)
+                self.detail_label.config(text="")
+            else:
+                self.progressbar.config(mode='determinate')
+                self.progressbar.stop()
+                self.progress_var.set(percent)
+                self.detail_label.config(text=f"{percent:.1f}%")
+        
+        if message:
+            self.message_label.config(text=message)
+            
+    def close(self):
+        self.destroy()
+
+
 class VideoEditorApp:
     """视频编辑器主应用类"""
     
@@ -87,6 +135,8 @@ class VideoEditorApp:
         # 视频相关变量
         self.video_path = None
         self.video_info = {}
+        
+        self.export_progress_dialog = None
         self.video_creation_time = None # 视频创建时间
         self.clips = []  # 剪辑片段列表
         self.timeline_thumbnails = {} # 时间轴缩略图 {time_sec: photo_image}
@@ -144,11 +194,18 @@ class VideoEditorApp:
         self.telemetry_resize_margin = 16
         self.display_frame_rect = None  # (x0, y0, w, h) in canvas px
         
+        # Speedometer Panel State
+        self.speedometer_rect_rel = [0.05, 0.65, 0.20, 0.20] # x_frac, y_frac, w_frac, h_frac (Square-ish aspect ratio handled in draw)
+        self.speedometer_dragging = False
+        self.speedometer_resizing = False
+        self.speedometer_drag_start = None
+
         # HUD Panels
         self.hud_panels = {
             'elevation': ElevationPanel(),
             'telemetry': TelemetryPanel(),
-            'track': TrackPanel()
+            'track': TrackPanel(),
+            'speedometer': SpeedometerPanel()
         }
 
         # 创建GUI
@@ -2131,9 +2188,21 @@ class VideoEditorApp:
             self.root.config(cursor="watch")
             self.update_status(f"正在导出视频: {file_path}...")
             
+            # 显示进度条
+            self.export_progress_dialog = ExportProgressDialog(self.root, "导出视频")
+            self.export_progress_dialog.update_progress(0, "准备开始...")
+            
             # 启动导出线程
             quality_mode = self.export_quality_var.get()
             threading.Thread(target=self._export_video_worker, args=(file_path, quality_mode), daemon=True).start()
+
+    def _update_export_progress(self, percent, message=None):
+        """更新导出进度 (线程安全)"""
+        try:
+            if self.export_progress_dialog and self.export_progress_dialog.winfo_exists():
+                self.export_progress_dialog.update_progress(percent, message)
+        except Exception:
+            pass # Ignore errors if dialog is closed
 
     def _export_video_worker(self, output_path, quality_mode="中 (平衡)"):
         """视频导出工作线程"""
@@ -2183,6 +2252,7 @@ class VideoEditorApp:
                 if time.time() - last_update_time > 0.5:
                     progress = (processed_frames / total_frames) * 100
                     self.root.after(0, self.update_status, f"导出中: {progress:.1f}%")
+                    self.root.after(0, self._update_export_progress, progress, f"渲染视频帧... ({processed_frames}/{total_frames})")
                     last_update_time = time.time()
             
             cap.release()
@@ -2194,15 +2264,22 @@ class VideoEditorApp:
             # 合并音频
             if has_ffmpeg: 
                 self.root.after(0, self.update_status, "正在合并音频并优化视频大小...")
+                self.root.after(0, self._update_export_progress, -1.0, "正在合并音频并优化大小 (这可能需要几分钟)...")
                 try:
                     # Determine quality settings (CRF: Lower is better quality/larger size)
-                    crf = 23 # Default (Medium)
-                    if "高" in quality_mode: crf = 18
-                    elif "低" in quality_mode: crf = 28
+                    # Widen the gap to ensure noticeable file size differences
+                    crf = 28 # Default (Medium) - balanced for sharing
+                    preset = 'medium'
                     
-                    # Use libx264 for re-encoding to reduce size significantly compared to raw copy
-                    # preset medium is a good balance of speed and compression
-                    video_args = ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+                    if "高" in quality_mode: 
+                        crf = 18 # High quality (visually lossless)
+                        preset = 'slow' # Better compression
+                    elif "低" in quality_mode: 
+                        crf = 38 # Low quality (very small file)
+                        preset = 'faster' # Faster encoding
+                    
+                    # Use libx264 for re-encoding
+                    video_args = ['-c:v', 'libx264', '-crf', str(crf), '-preset', preset]
 
                     ext_audio = self.external_audio_path if self.external_audio_path and os.path.exists(self.external_audio_path) else None
                     remove_orig = bool(self.remove_original_audio_var.get())
@@ -2281,12 +2358,16 @@ class VideoEditorApp:
                     self.root.after(0, messagebox.showinfo, "提示", "未检测到FFmpeg，导出的视频将没有声音。")
 
             self.root.after(0, self.update_status, f"导出完成: {output_path}")
+            self.root.after(0, self._update_export_progress, 100, "导出完成！")
             self.root.after(0, messagebox.showinfo, "成功", "视频导出成功！")
             
         except Exception as e:
             self.root.after(0, self.update_status, f"导出失败: {e}")
             self.root.after(0, messagebox.showerror, "错误", f"导出失败: {e}")
         finally:
+            if self.export_progress_dialog:
+                self.root.after(0, self.export_progress_dialog.close)
+                self.export_progress_dialog = None
             self.root.after(0, self.root.config, {"cursor": ""})
     
     # ============ 编辑功能 ============
@@ -2712,7 +2793,21 @@ class VideoEditorApp:
         x = max(0, min(int(x_frac * frame_w), frame_w - w))
         y = max(0, min(int(y_frac * frame_h), frame_h - h))
         return x, y, w, h
-    
+
+    def _get_speedometer_rect_px(self, frame_w, frame_h):
+        """Get Speedometer HUD pixel coordinates"""
+        x_frac, y_frac, w_frac, h_frac = self.speedometer_rect_rel
+        
+        # Base size on width/height but keep it square-ish usually handled by renderer, 
+        # but we define a bounding box here.
+        w = max(100, int(w_frac * frame_w))
+        h = max(100, int(h_frac * frame_h))
+        
+        # Ensure it fits in frame
+        x = max(0, min(int(x_frac * frame_w), frame_w - w))
+        y = max(0, min(int(y_frac * frame_h), frame_h - h))
+        return x, y, w, h
+
     def on_video_panel_press(self, event):
         if not self.display_frame_rect:
             return
@@ -2740,7 +2835,18 @@ class VideoEditorApp:
             else:
                 self.telemetry_dragging = True
                 self.telemetry_drag_start = (mx - px, my - py)
-    
+            return
+
+        # 3. Check Speedometer Panel
+        sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+        if sx <= mx <= sx+sw and sy <= my <= sy+sh:
+            if (sx+sw - mx) <= self.telemetry_resize_margin and (sy+sh - my) <= self.telemetry_resize_margin:
+                self.speedometer_resizing = True
+            else:
+                self.speedometer_dragging = True
+                self.speedometer_drag_start = (mx - sx, my - sy)
+            return
+
     def on_video_panel_drag(self, event):
         if not self.display_frame_rect:
             return
@@ -2749,7 +2855,9 @@ class VideoEditorApp:
         is_ele_drag = getattr(self, 'ele_profile_dragging', False)
         is_ele_resize = getattr(self, 'ele_profile_resizing', False)
         
-        if not (self.telemetry_dragging or self.telemetry_resizing or is_ele_drag or is_ele_resize):
+        if not (self.telemetry_dragging or self.telemetry_resizing or 
+                is_ele_drag or is_ele_resize or 
+                self.speedometer_dragging or self.speedometer_resizing):
             return
             
         fx, fy, fw, fh = self.display_frame_rect
@@ -2784,6 +2892,21 @@ class VideoEditorApp:
             new_h = max(30, min(max(10, my - ey), fh - ey))
             self.ele_profile_rect_rel[2] = new_w / fw
             self.ele_profile_rect_rel[3] = new_h / fh
+
+        # Speedometer Panel Operation
+        elif self.speedometer_dragging and self.speedometer_drag_start:
+            sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+            dx, dy = self.speedometer_drag_start
+            new_x = max(0, min(mx - dx, fw - sw))
+            new_y = max(0, min(my - dy, fh - sh))
+            self.speedometer_rect_rel[0] = new_x / fw
+            self.speedometer_rect_rel[1] = new_y / fh
+        elif self.speedometer_resizing:
+            sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+            new_w = max(100, min(max(10, mx - sx), fw - sx))
+            new_h = max(100, min(max(10, my - sy), fh - sy))
+            self.speedometer_rect_rel[2] = new_w / fw
+            self.speedometer_rect_rel[3] = new_h / fh
             
         if not self.playing and self.cap is not None:
             self.seek_to_frame(self.current_frame_pos)
@@ -2795,6 +2918,9 @@ class VideoEditorApp:
         self.ele_profile_dragging = False
         self.ele_profile_resizing = False
         self.ele_profile_drag_start = None
+        self.speedometer_dragging = False
+        self.speedometer_resizing = False
+        self.speedometer_drag_start = None
     
     def _draw_overlay_on_frame(self, frame, current_seconds):
         """在帧上绘制GPX叠加层"""
@@ -2832,6 +2958,13 @@ class VideoEditorApp:
             'grade': grade
         }
         self.hud_panels['telemetry'].draw(frame, telemetry_context)
+
+        speedometer_context = {
+            'current_seconds': current_seconds,
+            'speed': speed,
+            'rect': self._get_speedometer_rect_px(w, h)
+        }
+        self.hud_panels['speedometer'].draw(frame, speedometer_context)
             
         # --- 3. Draw Elevation Panel ---
         ele_rect = self._get_ele_profile_rect_px(w, h)

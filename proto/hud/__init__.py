@@ -3,3 +3,4 @@ from .base import HudPanel
 from .elevation import ElevationPanel
 from .telemetry import TelemetryPanel
 from .track import TrackPanel
+from .speedometer import SpeedometerPanel
