@@ -2470,25 +2470,12 @@ class VideoEditorApp:
             current_time = time.time()
             # 限制UI刷新率，例如最高30fps或60fps
             if current_time - last_display_time >= 0.03: 
-                # 预处理：在工作线程中缩放图像
-                target_w, target_h = self.target_display_size
-                if target_w < 100: target_w = 640
-                if target_h < 100: target_h = 360
-                
-                img_h, img_w = frame.shape[:2]
-                
-                # 只有当原图比目标大很多时才缩放
-                if img_w > target_w * 1.1 or img_h > target_h * 1.1:
-                    ratio = min(target_w / img_w, target_h / img_h)
-                    new_w = int(img_w * ratio)
-                    new_h = int(img_h * ratio)
-                    display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                else:
-                    display_frame = frame.copy()
-                
-                # 传递当前时间点，确保显示准确
+                # 预处理：在工作线程中缩放并绘制HUD
                 current_seconds = self.current_frame_pos / fps
-                self.root.after(0, self._display_frame, display_frame, current_seconds)
+                display_frame = self._prepare_display_frame(frame, current_seconds)
+                
+                if display_frame is not None:
+                    self.root.after(0, self._display_frame, display_frame, current_seconds)
                 
                 # 更新进度条 (每0.5秒更新一次，避免频繁刷新)
                 if current_time - last_display_time > 0.5:
@@ -2507,12 +2494,69 @@ class VideoEditorApp:
                 # 如果处理太慢，不需要sleep，下一次循环会通过跳帧逻辑来补偿
                 pass
     
-    def _display_frame(self, frame, current_seconds=None):
-        """显示视频帧"""
+    def _prepare_display_frame(self, frame, current_seconds=None):
+        """准备显示帧：缩放并绘制HUD，并转换为PIL Image"""
         if frame is None:
+            return None
+            
+        # 1. 缩放
+        # 获取目标尺寸
+        if not hasattr(self, 'target_display_size'):
+             canvas_width = self.video_canvas.winfo_width()
+             canvas_height = self.video_canvas.winfo_height()
+             if canvas_width <= 1: canvas_width = 640
+             if canvas_height <= 1: canvas_height = 360
+             target_w, target_h = canvas_width, canvas_height
+        else:
+             target_w, target_h = self.target_display_size
+             
+        if target_w < 100: target_w = 640
+        if target_h < 100: target_h = 360
+        
+        img_h, img_w = frame.shape[:2]
+        display_frame = frame
+        
+        # 只有当原图比目标大很多时才缩放
+        if img_w > target_w * 1.1 or img_h > target_h * 1.1:
+            ratio = min(target_w / img_w, target_h / img_h)
+            new_w = int(img_w * ratio)
+            new_h = int(img_h * ratio)
+            try:
+                display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                display_frame = frame.copy()
+        else:
+            # 如果不缩放，创建一个副本以防修改原数据（虽然通常不需要）
+            display_frame = frame.copy()
+        
+        # 2. 绘制HUD
+        if self.gpx_data:
+            if current_seconds is None:
+                fps = self.video_info.get('fps', 30.0)
+                current_seconds = self.current_frame_pos / fps if fps > 0 else 0
+            
+            try:
+                self._draw_overlay_on_frame(display_frame, current_seconds)
+            except Exception as e:
+                print(f"Error drawing overlay: {e}")
+        
+        # 3. 转换为 PIL Image (移至此处以减轻主线程负担)
+        try:
+            # 转换为 RGB
+            rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            # 转换为 PIL Image
+            image = Image.fromarray(rgb_frame)
+            return image
+        except Exception as e:
+            print(f"Error converting frame to image: {e}")
+            return None
+
+    def _display_frame(self, image, current_seconds=None):
+        """显示视频帧 (接受 PIL Image)"""
+        if image is None:
             return
 
-        # 1. 检查是否需要缩放 (如果传入的是原始大图)
+        # 获取画布尺寸用于居中显示
         canvas_width = self.video_canvas.winfo_width()
         canvas_height = self.video_canvas.winfo_height()
         
@@ -2520,38 +2564,25 @@ class VideoEditorApp:
             canvas_width = 640
             canvas_height = 360
             
-        img_h, img_w = frame.shape[:2]
+        # 注意：HUD绘制、缩放和图像转换已在工作线程或调用前完成，此处直接显示即可
         
-        # 如果图像比画布大很多，说明是原始帧，需要缩放
-        if img_w > canvas_width * 1.2 or img_h > canvas_height * 1.2:
-             ratio = min(canvas_width / img_w, canvas_height / img_h)
-             new_w = int(img_w * ratio)
-             new_h = int(img_h * ratio)
-             frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        
-        # 2. 叠加GPX信息
-        if self.gpx_data:
-            if current_seconds is None:
-                fps = self.video_info.get('fps', 30.0)
-                current_seconds = self.current_frame_pos / fps if fps > 0 else 0
-            self._draw_overlay_on_frame(frame, current_seconds)
+        try:
+            # 转换为 ImageTk (必须在主线程)
+            photo = ImageTk.PhotoImage(image=image)
             
-        # 转换为 RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # 转换为 ImageTk
-        img = Image.fromarray(rgb_frame)
-        photo = ImageTk.PhotoImage(image=img)
-        
-        # 更新画布
-        self.video_canvas.delete("all")
-        # 居中显示
-        x_center = canvas_width // 2
-        y_center = canvas_height // 2
-        self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
-        self.video_canvas.image = photo # 保持引用防止被垃圾回收
-        # 记录当前帧在画布的位置和大小，供鼠标拖放使用
-        self.display_frame_rect = (x_center - img.width // 2, y_center - img.height // 2, img.width, img.height)
+            # 更新画布
+            self.video_canvas.delete("all")
+            # 居中显示
+            x_center = canvas_width // 2
+            y_center = canvas_height // 2
+            self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
+            self.video_canvas.image = photo # 保持引用防止被垃圾回收
+            
+            # 记录当前帧在画布的位置和大小，供鼠标拖放使用
+            self.display_frame_rect = (x_center - image.width // 2, y_center - image.height // 2, image.width, image.height)
+            
+        except Exception as e:
+            print(f"Error displaying frame: {e}")
     
     def save_hud_config(self):
         """保存HUD配置到文件"""
@@ -3249,12 +3280,16 @@ class VideoEditorApp:
             
             # 读取并显示该帧
             ret, frame = self.cap.read()
+            
+            # 更新进度条
+            fps = self.video_info.get('fps', 30.0)
+            current_time = frame_number / fps if fps > 0 else 0
+            
             if ret and frame is not None:
-                self._display_frame(frame)
+                # 使用 _prepare_display_frame 进行缩放和HUD绘制
+                display_image = self._prepare_display_frame(frame, current_time)
+                self._display_frame(display_image, current_time)
                 
-                # 更新进度条
-                fps = self.video_info.get('fps', 30.0)
-                current_time = frame_number / fps if fps > 0 else 0
                 self.progress_var.set(current_time)
                 self._update_time_display(current_time)
             else:
@@ -3262,7 +3297,8 @@ class VideoEditorApp:
                 width = self.video_info.get('width', 640)
                 height = self.video_info.get('height', 480)
                 black_frame = np.zeros((height, width, 3), dtype=np.uint8)
-                self._display_frame(black_frame)
+                display_image = self._prepare_display_frame(black_frame, current_time)
+                self._display_frame(display_image, current_time)
                 
         except Exception as e:
             print(f"跳转帧时出错: {e}")
@@ -3272,7 +3308,8 @@ class VideoEditorApp:
             height = self.video_info.get('height', 480)
             error_frame = np.zeros((height, width, 3), dtype=np.uint8)
             # 这里可以添加错误文本显示
-            self._display_frame(error_frame)
+            display_image = self._prepare_display_frame(error_frame)
+            self._display_frame(display_image)
     
     def stop_play(self):
         """停止播放"""
