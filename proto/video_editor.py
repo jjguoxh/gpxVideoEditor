@@ -3155,82 +3155,152 @@ class VideoEditorApp:
                 grade = 0.0
         return ele, grade
     
+    def _draw_hex_stat(self, frame, center, radius, value, label):
+        """绘制六边形状态显示 (HUD组件)"""
+        cx, cy = center
+        # 生成六边形顶点 (尖顶朝上)
+        pts = []
+        for i in range(6):
+            angle_deg = 60 * i + 30
+            angle_rad = math.radians(angle_deg)
+            px = int(cx + radius * math.cos(angle_rad))
+            py = int(cy + radius * math.sin(angle_rad))
+            pts.append([px, py])
+            
+        pts = np.array(pts, np.int32).reshape((-1, 1, 2))
+        
+        # 1. 半透明填充 (浅灰色背景)
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [pts], (200, 200, 200)) 
+        # 混合模式: overlay * 0.3 + frame * 0.7
+        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+        
+        # 2. 边框 (白色)
+        cv2.polylines(frame, [pts], True, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        # 3. 文字
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        # 数值 (居中)
+        # 动态字体大小 (调小，从 /30 改为 /45，避免过大)
+        font_scale_val = radius / 45.0 
+        if font_scale_val < 0.35: font_scale_val = 0.35
+        
+        thickness = max(1, int(font_scale_val * 2))
+        (tw, th), base = cv2.getTextSize(str(value), font, font_scale_val, thickness)
+        cv2.putText(frame, str(value), (int(cx - tw/2), int(cy + th/2)), font, font_scale_val, (255, 255, 255), thickness, cv2.LINE_AA)
+        
+        # 标签 (下方)
+        font_scale_lbl = radius / 50.0
+        if font_scale_lbl < 0.3: font_scale_lbl = 0.3
+        
+        (tw2, th2), base2 = cv2.getTextSize(label, font, font_scale_lbl, 1)
+        cv2.putText(frame, label, (int(cx - tw2/2), int(cy + radius*0.6)), font, font_scale_lbl, (220, 220, 220), 1, cv2.LINE_AA)
+
     def _draw_telemetry_panel(self, frame, current_seconds, speed):
+        """绘制未来派HUD面板"""
         h, w = frame.shape[:2]
         x, y, ww, hh = self._get_telemetry_rect_px(w, h)
-        x2 = min(w, x + ww)
-        y2 = min(h, y + hh)
-        ww = max(0, x2 - x)
-        hh = max(0, y2 - y)
-        if ww < 10 or hh < 10:
+        
+        if ww < 50 or hh < 50:
             return
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 0, 0), -1)
-        alpha = 0.45
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-        cv2.rectangle(frame, (x, y), (x+ww, y+hh), (255, 255, 255), 1)
-        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (200, 200, 200), -1)
-        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (80, 80, 80), 1)
+
+        # 获取数据
         ele, grade = self._get_ele_grade_at_time(current_seconds)
-        texts = []
-        texts.append(f"速度  {speed:5.1f} km/h")
-        if ele is not None:
-            texts.append(f"海拔  {ele:5.0f} m")
-        if grade is not None:
-            texts.append(f"坡度  {grade:+4.1f}%")
-        try:
-            from PIL import Image as PILImage
-            from PIL import ImageDraw, ImageFont
-            roi = frame[y:y+hh, x:x+ww]
-            pil_img = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil_img)
-            base_size = max(14, min(int(hh * 0.28), int(ww * 0.14)))
-            font = None
-            font_paths = []
-            sysname = platform.system()
-            if sysname == 'Darwin':
-                font_paths = [
-                    '/System/Library/Fonts/PingFang.ttc',
-                    '/System/Library/Fonts/STHeiti Light.ttc',
-                    '/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc',
-                ]
-            elif sysname == 'Windows':
-                font_paths = [
-                    'C:\\Windows\\Fonts\\msyh.ttc',
-                    'C:\\Windows\\Fonts\\simhei.ttf',
-                    'C:\\Windows\\Fonts\\msyh.ttf',
-                ]
+        if ele is None: ele = 0.0
+        if grade is None: grade = 0.0
+        
+        # --- 布局计算 ---
+        # 垂直分割点: 上60%显示速度，下40%显示六边形
+        split_y = y + int(hh * 0.6)
+        
+        # --- 1. 速度区域 (上半部分) ---
+        speed_center_y = y + int((split_y - y) * 0.4)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        # 字体大小根据宽度动态调整 (改为更小，约原来0.6倍)
+        font_scale_speed = min(ww, hh) / 100.0 * 0.9
+        speed_str = f"{int(speed)}"
+        (tw, th), base = cv2.getTextSize(speed_str, font, font_scale_speed, 3)
+        
+        # 速度数值位置 (居中偏右)
+        tx = x + ww // 2 - tw // 2 + int(ww * 0.1) 
+        ty = speed_center_y + th // 2
+        
+        # 阴影/轮廓 (增加厚度以实现粗体效果)
+        cv2.putText(frame, speed_str, (tx+2, ty+2), font, font_scale_speed, (0, 0, 0), 6, cv2.LINE_AA)
+        cv2.putText(frame, speed_str, (tx, ty), font, font_scale_speed, (255, 255, 255), 3, cv2.LINE_AA)
+        
+        # 单位 KM/H (在速度左侧)
+        unit_str = "KM/H"
+        font_scale_unit = font_scale_speed * 0.3
+        (uw, uh), _ = cv2.getTextSize(unit_str, font, font_scale_unit, 1)
+        ux = tx - uw - 15
+        uy = ty
+        cv2.putText(frame, unit_str, (ux+1, uy+1), font, font_scale_unit, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, unit_str, (ux, uy), font, font_scale_unit, (200, 200, 200), 1, cv2.LINE_AA)
+        
+        # 装饰性线条 (左上角)
+        line_color = (200, 200, 200)
+        cv2.line(frame, (ux - 10, uy - uh), (ux - 10, uy + 5), line_color, 2, cv2.LINE_AA)
+        cv2.line(frame, (ux - 10, uy - uh), (ux + 20, uy - uh), line_color, 2, cv2.LINE_AA)
+        
+        # --- 速度条 (下方) ---
+        bar_y_start = ty + 15
+        bar_area_h = split_y - bar_y_start - 5
+        if bar_area_h < 10: bar_area_h = 10
+        
+        bar_area_w = int(ww * 0.9)
+        bar_x_start = x + (ww - bar_area_w) // 2
+        
+        num_bars = 20
+        gap = 3
+        bar_w = (bar_area_w - (num_bars - 1) * gap) / num_bars
+        
+        max_speed_disp = 60.0 # 假设最大显示速度60
+        ratio = min(1.0, speed / max_speed_disp)
+        active_bars = int(num_bars * ratio)
+        
+        # 速度条外框装饰
+        # 左括号
+        cv2.line(frame, (bar_x_start - 5, bar_y_start), (bar_x_start - 5, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
+        cv2.line(frame, (bar_x_start - 5, bar_y_start + bar_area_h), (bar_x_start + 10, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
+        # 右括号
+        cv2.line(frame, (bar_x_start + bar_area_w + 5, bar_y_start), (bar_x_start + bar_area_w + 5, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
+        cv2.line(frame, (bar_x_start + bar_area_w + 5, bar_y_start + bar_area_h), (bar_x_start + bar_area_w - 10, bar_y_start + bar_area_h), line_color, 2, cv2.LINE_AA)
+
+        for i in range(num_bars):
+            bx = int(bar_x_start + i * (bar_w + gap))
+            by = bar_y_start
+            
+            pt1 = (bx, by)
+            pt2 = (int(bx + bar_w), by + bar_area_h)
+            
+            if i < active_bars:
+                # 激活状态 (白色填充)
+                cv2.rectangle(frame, pt1, pt2, (255, 255, 255), -1)
             else:
-                font_paths = [
-                    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                    '/usr/share/fonts/truetype/arphic/ukai.ttc',
-                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                ]
-            for p in font_paths:
-                if os.path.exists(p):
-                    try:
-                        font = ImageFont.truetype(p, base_size)
-                        break
-                    except Exception:
-                        pass
-            if font is None:
-                try:
-                    font = ImageFont.load_default()
-                except Exception:
-                    font = None
-            ty = 8
-            for t in texts:
-                if font:
-                    draw.text((12+1, ty+1), t, font=font, fill=(0, 0, 0, 255))
-                    draw.text((12, ty), t, font=font, fill=(255, 255, 255, 255))
-                else:
-                    draw.text((12+1, ty+1), t, fill=(0, 0, 0, 255))
-                    draw.text((12, ty), t, fill=(255, 255, 255, 255))
-                ty += int(base_size * 1.1)
-            new_roi = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            frame[y:y+hh, x:x+ww] = new_roi
-        except Exception:
-            pass
+                # 未激活状态 (灰色空心)
+                cv2.rectangle(frame, pt1, pt2, (100, 100, 100), 1)
+
+        # --- 2. 下半部分：六边形 (海拔 & 坡度) ---
+        hex_y_center = split_y + (y + hh - split_y) // 2
+        hex_radius = int(min((y + hh - split_y) * 0.45, ww * 0.22))
+        
+        # 计算水平贴合距离
+        # 六边形宽度 = 2 * radius * cos(30) = sqrt(3) * radius
+        # 贴合距离 = sqrt(3) * radius
+        hex_dist = int(hex_radius * math.sqrt(3))
+        
+        # 两个六边形中心
+        hex1_cx = x + ww // 2 - hex_dist // 2 + 1  # +1 确保覆盖缝隙
+        hex2_cx = x + ww // 2 + hex_dist // 2 - 1
+        
+        # 绘制六边形 1 (海拔)
+        self._draw_hex_stat(frame, (hex1_cx, hex_y_center), hex_radius, f"{int(ele)}", "ALT m")
+        
+        # 绘制六边形 2 (坡度)
+        self._draw_hex_stat(frame, (hex2_cx, hex_y_center), hex_radius, f"{grade:.1f}", "SLOPE %")
 
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
