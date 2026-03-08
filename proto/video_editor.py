@@ -22,6 +22,13 @@ import tempfile
 import json
 import re
 import signal
+try:
+    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
+    from .hud_settings_dialog import HudSettingsDialog
+except ImportError:
+    # Fallback for running as a script
+    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
+    from hud_settings_dialog import HudSettingsDialog
 
 # 尝试导入numpy用于错误处理
 try:
@@ -68,6 +75,54 @@ else:  # Linux
     default_font = ('WenQuanYi Micro Hei', 10)
 
 
+class ExportProgressDialog(tk.Toplevel):
+    """导出进度对话框"""
+    def __init__(self, parent, title="导出视频"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("400x150")
+        self.resizable(False, False)
+        # self.attributes('-topmost', True) # Removed to avoid blocking other windows too aggressively
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # 禁用关闭按钮
+        
+        # 居中显示
+        try:
+            x = parent.winfo_rootx() + parent.winfo_width() // 2 - 200
+            y = parent.winfo_rooty() + parent.winfo_height() // 2 - 75
+            self.geometry(f"+{x}+{y}")
+        except:
+            pass
+        
+        self.message_label = ttk.Label(self, text="正在准备...", anchor="center")
+        self.message_label.pack(fill=tk.X, padx=20, pady=(20, 10))
+        
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progressbar = ttk.Progressbar(self, variable=self.progress_var, maximum=100)
+        self.progressbar.pack(fill=tk.X, padx=20, pady=10)
+        
+        self.detail_label = ttk.Label(self, text="0%", anchor="center")
+        self.detail_label.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+    def update_progress(self, percent, message=None):
+        if percent is not None:
+            if percent < 0:
+                self.progressbar.config(mode='indeterminate')
+                self.progressbar.start(10)
+                self.detail_label.config(text="")
+            else:
+                self.progressbar.config(mode='determinate')
+                self.progressbar.stop()
+                self.progress_var.set(percent)
+                self.detail_label.config(text=f"{percent:.1f}%")
+        
+        if message:
+            self.message_label.config(text=message)
+            
+    def close(self):
+        self.destroy()
+
+
 class VideoEditorApp:
     """视频编辑器主应用类"""
     
@@ -80,6 +135,8 @@ class VideoEditorApp:
         # 视频相关变量
         self.video_path = None
         self.video_info = {}
+        
+        self.export_progress_dialog = None
         self.video_creation_time = None # 视频创建时间
         self.clips = []  # 剪辑片段列表
         self.timeline_thumbnails = {} # 时间轴缩略图 {time_sec: photo_image}
@@ -137,6 +194,20 @@ class VideoEditorApp:
         self.telemetry_resize_margin = 16
         self.display_frame_rect = None  # (x0, y0, w, h) in canvas px
         
+        # Speedometer Panel State
+        self.speedometer_rect_rel = [0.05, 0.65, 0.20, 0.20] # x_frac, y_frac, w_frac, h_frac (Square-ish aspect ratio handled in draw)
+        self.speedometer_dragging = False
+        self.speedometer_resizing = False
+        self.speedometer_drag_start = None
+
+        # HUD Panels
+        self.hud_panels = {
+            'elevation': ElevationPanel(),
+            'telemetry': TelemetryPanel(),
+            'track': TrackPanel(),
+            'speedometer': SpeedometerPanel()
+        }
+
         # 创建GUI
         self.create_menu()
         self.create_toolbar()
@@ -155,6 +226,9 @@ class VideoEditorApp:
         self.root.bind(']', self.increase_offset)
         self.root.bind('{', self.decrease_offset_fine) # Shift+[
         self.root.bind('}', self.increase_offset_fine) # Shift+]
+
+        # 加载HUD配置
+        self.load_hud_config()
     
     def _get_ffprobe_cmd(self):
         """获取ffprobe命令路径"""
@@ -368,6 +442,13 @@ class VideoEditorApp:
         time_frame.pack(fill=tk.X, padx=5)
         self.time_label = ttk.Label(time_frame, text="00:00:00 / 00:00:00", font=default_font)
         self.time_label.pack(side=tk.LEFT)
+        self.preview_seconds_var = tk.IntVar(value=0)
+        self.preview_spinbox = ttk.Spinbox(time_frame, from_=0, to=0, increment=1,
+                                           textvariable=self.preview_seconds_var, width=6,
+                                           format="%.0f", command=self.on_preview_spinbox_change)
+        self.preview_spinbox.pack(side=tk.LEFT, padx=(10, 2))
+        self.preview_spinbox.bind('<Return>', self.on_preview_spinbox_change)
+        self.preview_spinbox.bind('<FocusOut>', self.on_preview_spinbox_change)
         control_buttons_frame = ttk.Frame(time_frame)
         control_buttons_frame.pack(side=tk.LEFT, padx=20)
         ttk.Button(control_buttons_frame, text="⏮", command=self.jump_to_start, width=3).pack(side=tk.LEFT, padx=1)
@@ -433,9 +514,9 @@ class VideoEditorApp:
         self.align_time_label.pack(side=tk.LEFT, padx=2)
         
         # 微调 Spinbox
-        self.align_spinbox = ttk.Spinbox(bottom_ctrl_frame, from_=0.0, to=0.0, increment=0.1, 
+        self.align_spinbox = ttk.Spinbox(bottom_ctrl_frame, from_=0.0, to=0.0, increment=1.0,
                                          textvariable=self.align_progress_var, width=10,
-                                         format="%.2f",
+                                         format="%.0f",
                                          command=self.on_align_spinbox_change)
         self.align_spinbox.pack(side=tk.LEFT, padx=2)
         self.align_spinbox.bind('<Return>', self.on_align_spinbox_change)
@@ -458,6 +539,22 @@ class VideoEditorApp:
         ttk.Checkbutton(audio_frame, text="移除原声(导出)", variable=self.remove_original_audio_var).pack(side=tk.LEFT, padx=8)
         self.audio_file_label = ttk.Label(audio_frame, text="未选择音轨")
         self.audio_file_label.pack(side=tk.LEFT, padx=8)
+        
+        # HUD Settings
+        hud_frame = ttk.LabelFrame(parent, text="HUD设置", padding=5)
+        hud_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(hud_frame, text="打开配置...", command=self.open_hud_settings).pack(side=tk.LEFT, padx=5)
+        
+        # Export Settings
+        export_frame = ttk.LabelFrame(parent, text="导出设置", padding=5)
+        export_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(export_frame, text="质量/大小:").pack(side=tk.LEFT, padx=5)
+        self.export_quality_var = tk.StringVar(value="中 (平衡)")
+        quality_combo = ttk.Combobox(export_frame, textvariable=self.export_quality_var, 
+                                     values=["高 (大文件)", "中 (平衡)", "低 (小文件)"], 
+                                     state="readonly", width=12)
+        quality_combo.pack(side=tk.LEFT, padx=5)
         
         # Init variables
         self.align_track_points = None
@@ -2091,14 +2188,30 @@ class VideoEditorApp:
         )
         
         if file_path:
+            # 保存HUD配置
+            self.save_hud_config()
+            
             # 禁用界面交互
             self.root.config(cursor="watch")
             self.update_status(f"正在导出视频: {file_path}...")
             
+            # 显示进度条
+            self.export_progress_dialog = ExportProgressDialog(self.root, "导出视频")
+            self.export_progress_dialog.update_progress(0, "准备开始...")
+            
             # 启动导出线程
-            threading.Thread(target=self._export_video_worker, args=(file_path,), daemon=True).start()
+            quality_mode = self.export_quality_var.get()
+            threading.Thread(target=self._export_video_worker, args=(file_path, quality_mode), daemon=True).start()
 
-    def _export_video_worker(self, output_path):
+    def _update_export_progress(self, percent, message=None):
+        """更新导出进度 (线程安全)"""
+        try:
+            if self.export_progress_dialog and self.export_progress_dialog.winfo_exists():
+                self.export_progress_dialog.update_progress(percent, message)
+        except Exception:
+            pass # Ignore errors if dialog is closed
+
+    def _export_video_worker(self, output_path, quality_mode="中 (平衡)"):
         """视频导出工作线程"""
         try:
             cap = cv2.VideoCapture(self.video_path)
@@ -2146,6 +2259,7 @@ class VideoEditorApp:
                 if time.time() - last_update_time > 0.5:
                     progress = (processed_frames / total_frames) * 100
                     self.root.after(0, self.update_status, f"导出中: {progress:.1f}%")
+                    self.root.after(0, self._update_export_progress, progress, f"渲染视频帧... ({processed_frames}/{total_frames})")
                     last_update_time = time.time()
             
             cap.release()
@@ -2156,16 +2270,32 @@ class VideoEditorApp:
             
             # 合并音频
             if has_ffmpeg: 
-                self.root.after(0, self.update_status, "正在合并音频...")
+                self.root.after(0, self.update_status, "正在合并音频并优化视频大小...")
+                self.root.after(0, self._update_export_progress, -1.0, "正在合并音频并优化大小 (这可能需要几分钟)...")
                 try:
+                    # Determine quality settings (CRF: Lower is better quality/larger size)
+                    # Widen the gap to ensure noticeable file size differences
+                    crf = 28 # Default (Medium) - balanced for sharing
+                    preset = 'medium'
+                    
+                    if "高" in quality_mode: 
+                        crf = 18 # High quality (visually lossless)
+                        preset = 'slow' # Better compression
+                    elif "低" in quality_mode: 
+                        crf = 38 # Low quality (very small file)
+                        preset = 'faster' # Faster encoding
+                    
+                    # Use libx264 for re-encoding
+                    video_args = ['-c:v', 'libx264', '-crf', str(crf), '-preset', preset]
+
                     ext_audio = self.external_audio_path if self.external_audio_path and os.path.exists(self.external_audio_path) else None
                     remove_orig = bool(self.remove_original_audio_var.get())
                     if ext_audio and remove_orig:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
                             '-i', temp_video_path,
-                            '-i', ext_audio,
-                            '-c:v', 'copy',
+                            '-i', ext_audio
+                        ] + video_args + [
                             '-c:a', 'aac',
                             '-map', '0:v:0',
                             '-map', '1:a:0',
@@ -2179,16 +2309,16 @@ class VideoEditorApp:
                             '-i', ext_audio,
                             '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]',
                             '-map', '0:v:0',
-                            '-map', '[aout]',
-                            '-c:v', 'copy',
+                            '-map', '[aout]'
+                        ] + video_args + [
                             '-c:a', 'aac',
                             output_path
                         ]
                     elif not ext_audio and remove_orig:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
-                            '-i', temp_video_path,
-                            '-c:v', 'copy',
+                            '-i', temp_video_path
+                        ] + video_args + [
                             '-an',
                             output_path
                         ]
@@ -2196,8 +2326,8 @@ class VideoEditorApp:
                         cmd = [
                             'ffmpeg', '-y', '-v', 'error',
                             '-i', temp_video_path,
-                            '-i', self.video_path,
-                            '-c:v', 'copy',
+                            '-i', self.video_path
+                        ] + video_args + [
                             '-c:a', 'aac',
                             '-map', '0:v:0',
                             '-map', '1:a:0',
@@ -2235,12 +2365,16 @@ class VideoEditorApp:
                     self.root.after(0, messagebox.showinfo, "提示", "未检测到FFmpeg，导出的视频将没有声音。")
 
             self.root.after(0, self.update_status, f"导出完成: {output_path}")
+            self.root.after(0, self._update_export_progress, 100, "导出完成！")
             self.root.after(0, messagebox.showinfo, "成功", "视频导出成功！")
             
         except Exception as e:
             self.root.after(0, self.update_status, f"导出失败: {e}")
             self.root.after(0, messagebox.showerror, "错误", f"导出失败: {e}")
         finally:
+            if self.export_progress_dialog:
+                self.root.after(0, self.export_progress_dialog.close)
+                self.export_progress_dialog = None
             self.root.after(0, self.root.config, {"cursor": ""})
     
     # ============ 编辑功能 ============
@@ -2329,6 +2463,10 @@ class VideoEditorApp:
         if not self.playing:
             # 开始播放
             self.playing = True
+            
+            # 保存HUD配置
+            self.save_hud_config()
+            
             self.play_btn['text'] = "⏸ 暂停"
             self.update_status("播放中...")
             self.start_audio_playback(self._current_time())
@@ -2460,25 +2598,12 @@ class VideoEditorApp:
             current_time = time.time()
             # 限制UI刷新率，例如最高30fps或60fps
             if current_time - last_display_time >= 0.03: 
-                # 预处理：在工作线程中缩放图像
-                target_w, target_h = self.target_display_size
-                if target_w < 100: target_w = 640
-                if target_h < 100: target_h = 360
-                
-                img_h, img_w = frame.shape[:2]
-                
-                # 只有当原图比目标大很多时才缩放
-                if img_w > target_w * 1.1 or img_h > target_h * 1.1:
-                    ratio = min(target_w / img_w, target_h / img_h)
-                    new_w = int(img_w * ratio)
-                    new_h = int(img_h * ratio)
-                    display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                else:
-                    display_frame = frame.copy()
-                
-                # 传递当前时间点，确保显示准确
+                # 预处理：在工作线程中缩放并绘制HUD
                 current_seconds = self.current_frame_pos / fps
-                self.root.after(0, self._display_frame, display_frame, current_seconds)
+                display_frame = self._prepare_display_frame(frame, current_seconds)
+                
+                if display_frame is not None:
+                    self.root.after(0, self._display_frame, display_frame, current_seconds)
                 
                 # 更新进度条 (每0.5秒更新一次，避免频繁刷新)
                 if current_time - last_display_time > 0.5:
@@ -2497,12 +2622,69 @@ class VideoEditorApp:
                 # 如果处理太慢，不需要sleep，下一次循环会通过跳帧逻辑来补偿
                 pass
     
-    def _display_frame(self, frame, current_seconds=None):
-        """显示视频帧"""
+    def _prepare_display_frame(self, frame, current_seconds=None):
+        """准备显示帧：缩放并绘制HUD，并转换为PIL Image"""
         if frame is None:
+            return None
+            
+        # 1. 缩放
+        # 获取目标尺寸
+        if not hasattr(self, 'target_display_size'):
+             canvas_width = self.video_canvas.winfo_width()
+             canvas_height = self.video_canvas.winfo_height()
+             if canvas_width <= 1: canvas_width = 640
+             if canvas_height <= 1: canvas_height = 360
+             target_w, target_h = canvas_width, canvas_height
+        else:
+             target_w, target_h = self.target_display_size
+             
+        if target_w < 100: target_w = 640
+        if target_h < 100: target_h = 360
+        
+        img_h, img_w = frame.shape[:2]
+        display_frame = frame
+        
+        # 只有当原图比目标大很多时才缩放
+        if img_w > target_w * 1.1 or img_h > target_h * 1.1:
+            ratio = min(target_w / img_w, target_h / img_h)
+            new_w = int(img_w * ratio)
+            new_h = int(img_h * ratio)
+            try:
+                display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                display_frame = frame.copy()
+        else:
+            # 如果不缩放，创建一个副本以防修改原数据（虽然通常不需要）
+            display_frame = frame.copy()
+        
+        # 2. 绘制HUD
+        if self.gpx_data:
+            if current_seconds is None:
+                fps = self.video_info.get('fps', 30.0)
+                current_seconds = self.current_frame_pos / fps if fps > 0 else 0
+            
+            try:
+                self._draw_overlay_on_frame(display_frame, current_seconds)
+            except Exception as e:
+                print(f"Error drawing overlay: {e}")
+        
+        # 3. 转换为 PIL Image (移至此处以减轻主线程负担)
+        try:
+            # 转换为 RGB
+            rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            # 转换为 PIL Image
+            image = Image.fromarray(rgb_frame)
+            return image
+        except Exception as e:
+            print(f"Error converting frame to image: {e}")
+            return None
+
+    def _display_frame(self, image, current_seconds=None):
+        """显示视频帧 (接受 PIL Image)"""
+        if image is None:
             return
 
-        # 1. 检查是否需要缩放 (如果传入的是原始大图)
+        # 获取画布尺寸用于居中显示
         canvas_width = self.video_canvas.winfo_width()
         canvas_height = self.video_canvas.winfo_height()
         
@@ -2510,39 +2692,86 @@ class VideoEditorApp:
             canvas_width = 640
             canvas_height = 360
             
-        img_h, img_w = frame.shape[:2]
+        # 注意：HUD绘制、缩放和图像转换已在工作线程或调用前完成，此处直接显示即可
         
-        # 如果图像比画布大很多，说明是原始帧，需要缩放
-        if img_w > canvas_width * 1.2 or img_h > canvas_height * 1.2:
-             ratio = min(canvas_width / img_w, canvas_height / img_h)
-             new_w = int(img_w * ratio)
-             new_h = int(img_h * ratio)
-             frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        
-        # 2. 叠加GPX信息
-        if self.gpx_data:
-            if current_seconds is None:
-                fps = self.video_info.get('fps', 30.0)
-                current_seconds = self.current_frame_pos / fps if fps > 0 else 0
-            self._draw_overlay_on_frame(frame, current_seconds)
+        try:
+            # 转换为 ImageTk (必须在主线程)
+            photo = ImageTk.PhotoImage(image=image)
             
-        # 转换为 RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # 转换为 ImageTk
-        img = Image.fromarray(rgb_frame)
-        photo = ImageTk.PhotoImage(image=img)
-        
-        # 更新画布
-        self.video_canvas.delete("all")
-        # 居中显示
-        x_center = canvas_width // 2
-        y_center = canvas_height // 2
-        self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
-        self.video_canvas.image = photo # 保持引用防止被垃圾回收
-        # 记录当前帧在画布的位置和大小，供鼠标拖放使用
-        self.display_frame_rect = (x_center - img.width // 2, y_center - img.height // 2, img.width, img.height)
+            # 更新画布
+            self.video_canvas.delete("all")
+            # 居中显示
+            x_center = canvas_width // 2
+            y_center = canvas_height // 2
+            self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
+            self.video_canvas.image = photo # 保持引用防止被垃圾回收
+            
+            # 记录当前帧在画布的位置和大小，供鼠标拖放使用
+            self.display_frame_rect = (x_center - image.width // 2, y_center - image.height // 2, image.width, image.height)
+            
+        except Exception as e:
+            print(f"Error displaying frame: {e}")
     
+    def open_hud_settings(self):
+        """打开HUD设置对话框"""
+        HudSettingsDialog(self.root, self.hud_panels, on_apply_callback=self.apply_hud_settings)
+
+    def apply_hud_settings(self):
+        self.save_hud_config()
+        if self.cap is not None and not self.playing:
+            self.seek_to_frame(self.current_frame_pos)
+
+    def save_hud_config(self):
+        """保存HUD配置到文件"""
+        config = {}
+        if hasattr(self, 'telemetry_rect_rel'):
+            config['telemetry_rect_rel'] = self.telemetry_rect_rel
+        
+        if hasattr(self, 'ele_profile_rect_rel'):
+             config['ele_profile_rect_rel'] = self.ele_profile_rect_rel
+        
+        # Save HUD panels config
+        config['hud_panels'] = {}
+        for name, panel in self.hud_panels.items():
+            config['hud_panels'][name] = panel.config
+             
+        try:
+            config_path = os.path.join(os.getcwd(), 'hud_config.json')
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save HUD config: {e}")
+
+    def load_hud_config(self):
+        """从文件加载HUD配置"""
+        try:
+            config_path = os.path.join(os.getcwd(), 'hud_config.json')
+            if not os.path.exists(config_path):
+                return
+                
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            if 'telemetry_rect_rel' in config:
+                self.telemetry_rect_rel = config['telemetry_rect_rel']
+                
+            if 'ele_profile_rect_rel' in config:
+                self.ele_profile_rect_rel = config['ele_profile_rect_rel']
+            
+            if 'hud_panels' in config:
+                for name, panel_config in config['hud_panels'].items():
+                    if name in self.hud_panels:
+                        # Convert lists back to tuples for colors if needed (json loads tuples as lists)
+                        # The update_config might need to handle this, or we handle it here.
+                        # Since we use update_config, let's assume it handles it or we trust python's loose typing for colors in cv2 (it accepts lists usually)
+                        # However, for hashability or strict types, tuples are better.
+                        # Let's do a quick recursive conversion if keys end with 'color' or values are lists of numbers?
+                        # For now, cv2 usually accepts lists for colors.
+                        self.hud_panels[name].update_config(panel_config)
+                        
+        except Exception as e:
+            print(f"Failed to load HUD config: {e}")
+
     def _get_telemetry_rect_px(self, frame_w, frame_h):
         x_frac, y_frac, w_frac, h_frac = self.telemetry_rect_rel
         w = max(100, int(w_frac * frame_w))
@@ -2550,7 +2779,47 @@ class VideoEditorApp:
         x = max(0, min(int(x_frac * frame_w), frame_w - w))
         y = max(0, min(int(y_frac * frame_h), frame_h - h))
         return x, y, w, h
-    
+
+    def _get_ele_profile_rect_px(self, frame_w, frame_h):
+        """获取高程HUD的像素坐标"""
+        if not hasattr(self, 'ele_profile_rect_rel'):
+            # 默认布局: 底部居中, 左右边距40, 高度100
+            margin_x = 40
+            panel_h = 100
+            panel_w = max(100, frame_w - 2 * margin_x)
+            
+            x_rel = margin_x / frame_w
+            w_rel = panel_w / frame_w
+            h_rel = panel_h / frame_h
+            y_rel = (frame_h - 20 - panel_h) / frame_h
+            
+            self.ele_profile_rect_rel = [x_rel, y_rel, w_rel, h_rel]
+
+        x_frac, y_frac, w_frac, h_frac = self.ele_profile_rect_rel
+        
+        # 限制宽高不超过屏幕
+        w = max(50, min(int(w_frac * frame_w), frame_w))
+        h = max(30, min(int(h_frac * frame_h), frame_h))
+        
+        # 确保位置在屏幕内
+        x = max(0, min(int(x_frac * frame_w), frame_w - w))
+        y = max(0, min(int(y_frac * frame_h), frame_h - h))
+        return x, y, w, h
+
+    def _get_speedometer_rect_px(self, frame_w, frame_h):
+        """Get Speedometer HUD pixel coordinates"""
+        x_frac, y_frac, w_frac, h_frac = self.speedometer_rect_rel
+        
+        # Base size on width/height but keep it square-ish usually handled by renderer, 
+        # but we define a bounding box here.
+        w = max(100, int(w_frac * frame_w))
+        h = max(100, int(h_frac * frame_h))
+        
+        # Ensure it fits in frame
+        x = max(0, min(int(x_frac * frame_w), frame_w - w))
+        y = max(0, min(int(y_frac * frame_h), frame_h - h))
+        return x, y, w, h
+
     def on_video_panel_press(self, event):
         if not self.display_frame_rect:
             return
@@ -2558,33 +2827,102 @@ class VideoEditorApp:
         mx, my = event.x - fx, event.y - fy
         if mx < 0 or my < 0 or mx > fw or my > fh:
             return
+            
+        # 1. 检查高程HUD (绘制在最上层，优先检查)
+        ele_visible = self.hud_panels.get('elevation').config.get('visible', True)
+        ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+        if ele_visible and ex <= mx <= ex+ew and ey <= my <= ey+eh:
+            # 检查右下角缩放区域
+            if (ex+ew - mx) <= self.telemetry_resize_margin and (ey+eh - my) <= self.telemetry_resize_margin:
+                self.ele_profile_resizing = True
+            else:
+                self.ele_profile_dragging = True
+                self.ele_profile_drag_start = (mx - ex, my - ey)
+            return
+
+        # 2. 检查遥测面板
+        telemetry_visible = self.hud_panels.get('telemetry').config.get('visible', True)
         px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
-        if px <= mx <= px+pw and py <= my <= py+ph:
+        if telemetry_visible and px <= mx <= px+pw and py <= my <= py+ph:
             if (px+pw - mx) <= self.telemetry_resize_margin and (py+ph - my) <= self.telemetry_resize_margin:
                 self.telemetry_resizing = True
             else:
                 self.telemetry_dragging = True
                 self.telemetry_drag_start = (mx - px, my - py)
-    
+            return
+
+        # 3. Check Speedometer Panel
+        speedometer_visible = self.hud_panels.get('speedometer').config.get('visible', True)
+        sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+        if speedometer_visible and sx <= mx <= sx+sw and sy <= my <= sy+sh:
+            if (sx+sw - mx) <= self.telemetry_resize_margin and (sy+sh - my) <= self.telemetry_resize_margin:
+                self.speedometer_resizing = True
+            else:
+                self.speedometer_dragging = True
+                self.speedometer_drag_start = (mx - sx, my - sy)
+            return
+
     def on_video_panel_drag(self, event):
         if not self.display_frame_rect:
             return
-        if not (self.telemetry_dragging or self.telemetry_resizing):
+            
+        # 检查是否有任何面板正在被操作
+        is_ele_drag = getattr(self, 'ele_profile_dragging', False)
+        is_ele_resize = getattr(self, 'ele_profile_resizing', False)
+        
+        if not (self.telemetry_dragging or self.telemetry_resizing or 
+                is_ele_drag or is_ele_resize or 
+                self.speedometer_dragging or self.speedometer_resizing):
             return
+            
         fx, fy, fw, fh = self.display_frame_rect
         mx, my = event.x - fx, event.y - fy
-        px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
+        
+        # 遥测面板操作
         if self.telemetry_dragging and self.telemetry_drag_start:
+            px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
             dx, dy = self.telemetry_drag_start
             new_x = max(0, min(mx - dx, fw - pw))
             new_y = max(0, min(my - dy, fh - ph))
             self.telemetry_rect_rel[0] = new_x / fw
             self.telemetry_rect_rel[1] = new_y / fh
         elif self.telemetry_resizing:
+            px, py, pw, ph = self._get_telemetry_rect_px(fw, fh)
             new_w = max(100, min(max(10, mx - px), fw - px))
             new_h = max(60, min(max(10, my - py), fh - py))
             self.telemetry_rect_rel[2] = new_w / fw
             self.telemetry_rect_rel[3] = new_h / fh
+            
+        # 高程HUD操作
+        elif is_ele_drag and hasattr(self, 'ele_profile_drag_start') and self.ele_profile_drag_start:
+            ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+            dx, dy = self.ele_profile_drag_start
+            new_x = max(0, min(mx - dx, fw - ew))
+            new_y = max(0, min(my - dy, fh - eh))
+            self.ele_profile_rect_rel[0] = new_x / fw
+            self.ele_profile_rect_rel[1] = new_y / fh
+        elif is_ele_resize:
+            ex, ey, ew, eh = self._get_ele_profile_rect_px(fw, fh)
+            new_w = max(50, min(max(10, mx - ex), fw - ex))
+            new_h = max(30, min(max(10, my - ey), fh - ey))
+            self.ele_profile_rect_rel[2] = new_w / fw
+            self.ele_profile_rect_rel[3] = new_h / fh
+
+        # Speedometer Panel Operation
+        elif self.speedometer_dragging and self.speedometer_drag_start:
+            sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+            dx, dy = self.speedometer_drag_start
+            new_x = max(0, min(mx - dx, fw - sw))
+            new_y = max(0, min(my - dy, fh - sh))
+            self.speedometer_rect_rel[0] = new_x / fw
+            self.speedometer_rect_rel[1] = new_y / fh
+        elif self.speedometer_resizing:
+            sx, sy, sw, sh = self._get_speedometer_rect_px(fw, fh)
+            new_w = max(100, min(max(10, mx - sx), fw - sx))
+            new_h = max(100, min(max(10, my - sy), fh - sy))
+            self.speedometer_rect_rel[2] = new_w / fw
+            self.speedometer_rect_rel[3] = new_h / fh
+            
         if not self.playing and self.cap is not None:
             self.seek_to_frame(self.current_frame_pos)
     
@@ -2592,6 +2930,12 @@ class VideoEditorApp:
         self.telemetry_dragging = False
         self.telemetry_resizing = False
         self.telemetry_drag_start = None
+        self.ele_profile_dragging = False
+        self.ele_profile_resizing = False
+        self.ele_profile_drag_start = None
+        self.speedometer_dragging = False
+        self.speedometer_resizing = False
+        self.speedometer_drag_start = None
     
     def _draw_overlay_on_frame(self, frame, current_seconds):
         """在帧上绘制GPX叠加层"""
@@ -2601,12 +2945,53 @@ class VideoEditorApp:
         speed, hr, lat, lon = self.get_data_at_time(current_seconds)
         h, w = frame.shape[:2]
         
-        # 1. 绘制轨迹 (局部跟随视角)
-        self._draw_local_track_view(frame, current_seconds)
+        # --- 1. Draw Track Panel ---
+        # Get smoothed state
+        smooth_state = self._get_smoothed_state(current_seconds + self.gpx_offset)
+        
+        track_context = {
+            'gpx_data': self.gpx_data,
+            'current_seconds': current_seconds,
+            'gpx_offset': self.gpx_offset,
+            'smooth_lats': getattr(self, 'smooth_lats', None),
+            'smooth_lons': getattr(self, 'smooth_lons', None),
+            'last_idx': getattr(self, '_last_idx', 0),
+            'current_state': smooth_state,
+            # Pass rect if configured? For now using default dynamic logic in TrackPanel unless overridden
+        }
+        self.hud_panels['track'].draw(frame, track_context)
 
-        # 2. 绘制浮动遥测面板（速度/海拔/坡度）
-        if hasattr(self, '_draw_telemetry_panel'):
-            self._draw_telemetry_panel(frame, current_seconds, speed)
+        # --- 2. Draw Telemetry Panel ---
+        ele, grade = self._get_ele_grade_at_time(current_seconds)
+        telemetry_rect = self._get_telemetry_rect_px(w, h)
+        
+        telemetry_context = {
+            'rect': telemetry_rect,
+            'current_seconds': current_seconds,
+            'speed': speed,
+            'ele': ele,
+            'grade': grade
+        }
+        self.hud_panels['telemetry'].draw(frame, telemetry_context)
+
+        speedometer_context = {
+            'current_seconds': current_seconds,
+            'speed': speed,
+            'rect': self._get_speedometer_rect_px(w, h)
+        }
+        self.hud_panels['speedometer'].draw(frame, speedometer_context)
+            
+        # --- 3. Draw Elevation Panel ---
+        ele_rect = self._get_ele_profile_rect_px(w, h)
+        ele_context = {
+            'rect': ele_rect,
+            'current_seconds': current_seconds,
+            'gpx_data': self.gpx_data,
+            'video_duration': self.video_info.get('duration', 0),
+            'gpx_offset': self.gpx_offset,
+            'ele': ele
+        }
+        self.hud_panels['elevation'].draw(frame, ele_context)
 
         # 4. 显示调试信息 (始终显示在左上角)
         debug_y = 40
@@ -2637,165 +3022,6 @@ class VideoEditorApp:
                 cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 debug_y += 25
 
-                    
-    def _draw_local_track_view(self, frame, current_seconds):
-        """绘制局部跟随视角轨迹"""
-        if not self.gpx_data or 'smoothed_segments' not in self.gpx_data:
-            return
-
-        # 获取当前状态
-        # 1. 插值获取当前平滑后的 lat, lon, heading
-        t = current_seconds + self.gpx_offset
-        state = self._get_smoothed_state(t)
-        if not state:
-            return
-            
-        cur_lat, cur_lon, cur_heading = state
-        
-        # 参数设置
-        h, w = frame.shape[:2]
-        # 动态调整视图大小
-        view_size = min(int(w * 0.3), int(h * 0.4))
-        view_size = max(150, min(view_size, 300))
-        
-        scale = 1.0      # 缩放比例 (像素/米) - 300米高度大约对应 0.5-1.0
-        # 300m 高度，假设垂直FOV 60度 -> 地面可见高度 ~346m
-        # 如果视图高度200px -> 346m -> scale = 0.58 px/m
-        scale = view_size / 350.0 
-        
-        cam_behind_m = 100.0 # 摄像机在后方100米
-        
-        # 创建透明图层
-        overlay = np.zeros((view_size, view_size, 4), dtype=np.uint8)
-        
-        # 绘图中心 (摄像机位置)
-        # 调整摄像机位置到视图下方，以便看到前方更多路况
-        cx, cy = view_size // 2, view_size - 30
-        
-        # 坐标转换函数: 世界坐标(米) -> 屏幕坐标(像素)
-        # 1. 以摄像机为原点 (当前点前100米) -> 世界坐标
-        # 2. 旋转 (heading向上)
-        # 3. 缩放 + 平移
-        
-        # 预先筛选附近的点 (比如前后1000米范围)
-        # 简单起见，遍历所有点（优化：可以使用空间索引或时间索引）
-        # 这里使用时间窗口优化：前后 120秒
-        
-        segs = self.gpx_data['smoothed_segments']
-        
-        # 找到当前时间对应的索引附近的点
-        # 简单遍历优化：只取当前时间前后N个点
-        # 假设1秒1个点，取前后300个点
-        
-        points_to_draw = []
-        
-        # 旋转矩阵 (逆时针旋转 -heading + 90? No, heading is usually 0=North, 90=East)
-        # 我们希望 Heading 指向 屏幕上方 (-Y)
-        # 原始 Heading: 0=N, 90=E. 
-        # 屏幕坐标: 0度=右, 90度=下 (通常数学定义)
-        # 让我们使用标准变换：
-        # dx, dy 是相对于当前点的墨卡托投影距离 (米)
-        # 旋转角度 theta = -heading (把当前方向转到正北/正上)
-        # 实际上我们希望 Heading 对应屏幕 UP (-y)
-        
-        rad_heading = math.radians(cur_heading)
-        cos_h = math.cos(rad_heading)
-        sin_h = math.sin(rad_heading)
-        
-        # 摄像机位置 (相对于当前点): 位于后方100米
-        # 也就是说，摄像机坐标 = 当前点坐标 - 100m * 方向向量
-        # 但我们是以摄像机为中心绘图。
-        # 所以当前点在摄像机坐标系中的位置是 (0, 100) (假设Y轴向前)
-        
-        # 使用numpy加速计算
-        # 1. 确定索引范围
-        start_idx = max(0, self._last_idx - 300)
-        end_idx = min(len(segs), self._last_idx + 300)
-        
-        if start_idx >= end_idx:
-            return
-
-        # 检查是否有缓存的numpy数组
-        if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
-            lats = self.smooth_lats[start_idx:end_idx]
-            lons = self.smooth_lons[start_idx:end_idx]
-        else:
-            # 尝试重新生成平滑数据以获取缓存 (Lazy Init)
-            self._smooth_gpx_data()
-            if hasattr(self, 'smooth_lats') and hasattr(self, 'smooth_lons'):
-                lats = self.smooth_lats[start_idx:end_idx]
-                lons = self.smooth_lons[start_idx:end_idx]
-            else:
-                # 回退到列表推导
-                lats = np.array([s['lat'] for s in segs[start_idx:end_idx]])
-                lons = np.array([s['lon'] for s in segs[start_idx:end_idx]])
-            
-        # 向量化计算
-        # 1. 相对距离 (米)
-        dys = (lats - cur_lat) * 111320
-        dxs = (lons - cur_lon) * 111320 * math.cos(math.radians(cur_lat))
-        
-        # 2. 旋转
-        # Local Forward (Y') = dy * cos(h) + dx * sin(h)
-        # Local Right (X') = dx * cos(h) - dy * sin(h)
-        local_ys = dys * cos_h + dxs * sin_h
-        local_xs = dxs * cos_h - dys * sin_h
-        
-        # 3. 转换为屏幕坐标
-        sxs = cx + local_xs * scale
-        sys = cy - (local_ys + cam_behind_m) * scale
-        
-        # 4. 过滤屏幕外的点 (可选优化)
-        # margin = 50
-        # mask = (sxs >= -margin) & (sxs < view_size + margin) & (sys >= -margin) & (sys < view_size + margin)
-        # sxs = sxs[mask]
-        # sys = sys[mask]
-        
-        # 转换并堆叠
-        pts_screen = np.stack((sxs, sys), axis=1).astype(np.int32)
-
-        
-        # 绘制轨迹
-        if len(pts_screen) > 1:
-            cv2.polylines(overlay, [pts_screen], False, (0, 255, 0, 200), 2, cv2.LINE_AA)
-            
-        # 绘制当前点 (实心圆)
-        # 当前点在 Local (0,0)
-        curr_sx = int(cx)
-        curr_sy = int(cy - cam_behind_m * scale)
-        cv2.circle(overlay, (curr_sx, curr_sy), 5, (0, 0, 255, 255), -1, cv2.LINE_AA)
-        cv2.circle(overlay, (curr_sx, curr_sy), 7, (255, 255, 255, 255), 1, cv2.LINE_AA)
-        
-        # 叠加到 Frame
-        h, w = frame.shape[:2]
-        x_offset = w - view_size - 20
-        y_offset = 20
-        
-        roi = frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size]
-        
-        # 简单 Alpha 混合 (使用整数运算优化)
-        # 假设 overlay 是 BGRA
-        
-        # 分离通道
-        ov_bgr = overlay[:, :, :3].astype(np.int32)
-        ov_alpha = overlay[:, :, 3].astype(np.int32)[:, :, np.newaxis]
-        
-        roi_int = roi.astype(np.int32)
-        
-        # 混合: (src * alpha + dst * (255 - alpha)) / 255
-        # 使用位移优化除法 ( >> 8 ) 近似 / 256, 或者直接 / 255
-        # 为了准确性使用 / 255
-        
-        blended = (ov_bgr * ov_alpha + roi_int * (255 - ov_alpha)) // 255
-        blended = blended.astype(np.uint8)
-        
-        frame[y_offset:y_offset+view_size, x_offset:x_offset+view_size] = blended
-        
-        # 画个边框
-        cv2.rectangle(frame, (x_offset, y_offset), (x_offset+view_size, y_offset+view_size), (255, 255, 255), 1)
-        cv2.putText(frame, "Follow Cam", (x_offset + 5, y_offset + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-    
     def _get_ele_grade_at_time(self, current_seconds):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
             return None, None
@@ -2839,86 +3065,10 @@ class VideoEditorApp:
                 grade = 0.0
         return ele, grade
     
-    def _draw_telemetry_panel(self, frame, current_seconds, speed):
-        h, w = frame.shape[:2]
-        x, y, ww, hh = self._get_telemetry_rect_px(w, h)
-        x2 = min(w, x + ww)
-        y2 = min(h, y + hh)
-        ww = max(0, x2 - x)
-        hh = max(0, y2 - y)
-        if ww < 10 or hh < 10:
-            return
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 0, 0), -1)
-        alpha = 0.45
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-        cv2.rectangle(frame, (x, y), (x+ww, y+hh), (255, 255, 255), 1)
-        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (200, 200, 200), -1)
-        cv2.rectangle(frame, (x+ww-12, y+hh-12), (x+ww-2, y+hh-2), (80, 80, 80), 1)
-        ele, grade = self._get_ele_grade_at_time(current_seconds)
-        texts = []
-        texts.append(f"速度  {speed:5.1f} km/h")
-        if ele is not None:
-            texts.append(f"海拔  {ele:5.0f} m")
-        if grade is not None:
-            texts.append(f"坡度  {grade:+4.1f}%")
-        try:
-            from PIL import Image as PILImage
-            from PIL import ImageDraw, ImageFont
-            roi = frame[y:y+hh, x:x+ww]
-            pil_img = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil_img)
-            base_size = max(14, min(int(hh * 0.28), int(ww * 0.14)))
-            font = None
-            font_paths = []
-            sysname = platform.system()
-            if sysname == 'Darwin':
-                font_paths = [
-                    '/System/Library/Fonts/PingFang.ttc',
-                    '/System/Library/Fonts/STHeiti Light.ttc',
-                    '/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc',
-                ]
-            elif sysname == 'Windows':
-                font_paths = [
-                    'C:\\Windows\\Fonts\\msyh.ttc',
-                    'C:\\Windows\\Fonts\\simhei.ttf',
-                    'C:\\Windows\\Fonts\\msyh.ttf',
-                ]
-            else:
-                font_paths = [
-                    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                    '/usr/share/fonts/truetype/arphic/ukai.ttc',
-                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                ]
-            for p in font_paths:
-                if os.path.exists(p):
-                    try:
-                        font = ImageFont.truetype(p, base_size)
-                        break
-                    except Exception:
-                        pass
-            if font is None:
-                try:
-                    font = ImageFont.load_default()
-                except Exception:
-                    font = None
-            ty = 8
-            for t in texts:
-                if font:
-                    draw.text((12+1, ty+1), t, font=font, fill=(0, 0, 0, 255))
-                    draw.text((12, ty), t, font=font, fill=(255, 255, 255, 255))
-                else:
-                    draw.text((12+1, ty+1), t, fill=(0, 0, 0, 255))
-                    draw.text((12, ty), t, fill=(255, 255, 255, 255))
-                ty += int(base_size * 1.1)
-            new_roi = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            frame[y:y+hh, x:x+ww] = new_roi
-        except Exception:
-            pass
-
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
         duration = self.video_info.get('duration', 0)
+        self.preview_seconds_var.set(int(round(current_time)))
         self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
         
         # 更新播放头位置
@@ -2964,12 +3114,16 @@ class VideoEditorApp:
             
             # 读取并显示该帧
             ret, frame = self.cap.read()
+            
+            # 更新进度条
+            fps = self.video_info.get('fps', 30.0)
+            current_time = frame_number / fps if fps > 0 else 0
+            
             if ret and frame is not None:
-                self._display_frame(frame)
+                # 使用 _prepare_display_frame 进行缩放和HUD绘制
+                display_image = self._prepare_display_frame(frame, current_time)
+                self._display_frame(display_image, current_time)
                 
-                # 更新进度条
-                fps = self.video_info.get('fps', 30.0)
-                current_time = frame_number / fps if fps > 0 else 0
                 self.progress_var.set(current_time)
                 self._update_time_display(current_time)
             else:
@@ -2977,7 +3131,8 @@ class VideoEditorApp:
                 width = self.video_info.get('width', 640)
                 height = self.video_info.get('height', 480)
                 black_frame = np.zeros((height, width, 3), dtype=np.uint8)
-                self._display_frame(black_frame)
+                display_image = self._prepare_display_frame(black_frame, current_time)
+                self._display_frame(display_image, current_time)
                 
         except Exception as e:
             print(f"跳转帧时出错: {e}")
@@ -2987,7 +3142,8 @@ class VideoEditorApp:
             height = self.video_info.get('height', 480)
             error_frame = np.zeros((height, width, 3), dtype=np.uint8)
             # 这里可以添加错误文本显示
-            self._display_frame(error_frame)
+            display_image = self._prepare_display_frame(error_frame)
+            self._display_frame(display_image)
     
     def stop_play(self):
         """停止播放"""
@@ -3220,6 +3376,8 @@ class VideoEditorApp:
             
             # 更新进度条最大值
             self.progress_scale.config(to=self.video_info.get('duration', 100))
+            if hasattr(self, 'preview_spinbox'):
+                self.preview_spinbox.config(to=int(self.video_info.get('duration', 0)))
     
     def update_preview_label(self, text):
         """更新预览标签"""
@@ -3400,6 +3558,19 @@ class VideoEditorApp:
             # 恢复播放
             self.toggle_play()
 
+    def on_preview_spinbox_change(self, event=None):
+        if not self.video_info:
+            return
+        try:
+            target_sec = int(float(self.preview_seconds_var.get()))
+        except Exception:
+            target_sec = 0
+        duration = int(self.video_info.get('duration', 0))
+        target_sec = max(0, min(target_sec, duration))
+        self.preview_seconds_var.set(target_sec)
+        self.progress_var.set(float(target_sec))
+        self.on_progress_change(float(target_sec))
+
     def on_progress_change(self, value):
         """进度条改变事件"""
         if self.cap is None:
@@ -3414,6 +3585,7 @@ class VideoEditorApp:
             self.seek_to_frame(frame_number)
         
         duration = self.video_info.get('duration', 0)
+        self.preview_seconds_var.set(int(round(current_time)))
         self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
     
     def on_clip_select(self, event):
