@@ -2611,8 +2611,12 @@ class VideoEditorApp:
             self.ele_profile_rect_rel = [x_rel, y_rel, w_rel, h_rel]
 
         x_frac, y_frac, w_frac, h_frac = self.ele_profile_rect_rel
-        w = max(50, int(w_frac * frame_w))
-        h = max(30, int(h_frac * frame_h))
+        
+        # 限制宽高不超过屏幕
+        w = max(50, min(int(w_frac * frame_w), frame_w))
+        h = max(30, min(int(h_frac * frame_h), frame_h))
+        
+        # 确保位置在屏幕内
         x = max(0, min(int(x_frac * frame_w), frame_w - w))
         y = max(0, min(int(y_frac * frame_h), frame_h - h))
         return x, y, w, h
@@ -2761,20 +2765,22 @@ class VideoEditorApp:
         
         # 获取动态布局
         x_start, y_start, panel_w, panel_h = self._get_ele_profile_rect_px(w, h)
+
         
         if panel_w < 50 or panel_h < 20:
             return
         
-        # 检查缓存
-        cache_key = (id(self.gpx_data), gpx_offset, video_duration, panel_w, panel_h)
+        # 检查缓存 (增加版本号 v2 以强制刷新缓存)
+        cache_key = (id(self.gpx_data), gpx_offset, video_duration, panel_w, panel_h, 'v2')
         
         if not hasattr(self, '_ele_profile_cache') or self._ele_profile_cache.get('key') != cache_key:
             # 生成缓存图像
-            overlay_bgr = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+            # 白色背景 (255, 255, 255)
+            overlay_bgr = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
             overlay_alpha = np.zeros((panel_h, panel_w), dtype=np.float32)
             
-            # 背景半透明
-            overlay_alpha[:] = 0.3 
+            # 背景半透明 (白色磨砂效果，提高不透明度以防看不清)
+            overlay_alpha[:] = 0.4 
             
             segments = self.gpx_data['segments']
             start_t = gpx_offset
@@ -2850,21 +2856,21 @@ class VideoEditorApp:
                 poly_pts = np.array(poly_pts, np.int32)
                 poly_pts = poly_pts.reshape((-1, 1, 2))
                 
-                # 绘制填充 (浅青色)
-                cv2.fillPoly(overlay_bgr, [poly_pts], (200, 255, 255))
+                # 绘制填充 (浅灰色)
+                cv2.fillPoly(overlay_bgr, [poly_pts], (220, 220, 220))
                 
                 # 填充区域不透明度增加
                 mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
                 cv2.fillPoly(mask, [poly_pts], 255)
                 overlay_alpha[mask > 0] = 0.5
                 
-                # 绘制线条 (黄色)
-                cv2.polylines(overlay_bgr, [pts_px.reshape((-1, 1, 2))], False, (0, 255, 255), 2, cv2.LINE_AA)
+                # 绘制线条 (深灰色)
+                cv2.polylines(overlay_bgr, [pts_px.reshape((-1, 1, 2))], False, (60, 60, 60), 2, cv2.LINE_AA)
                 
                 # 线条部分设为不透明 (通过mask膨胀)
                 line_mask = np.zeros((panel_h, panel_w), dtype=np.uint8)
                 cv2.polylines(line_mask, [pts_px.reshape((-1, 1, 2))], False, 255, 2)
-                overlay_alpha[line_mask > 0] = 0.9
+                overlay_alpha[line_mask > 0] = 0.8
 
             self._ele_profile_cache = {
                 'key': cache_key,
@@ -2897,7 +2903,7 @@ class VideoEditorApp:
         cx = max(0, min(cx, panel_w - 1))
         
         # 垂直线
-        cv2.line(frame, (x_start + cx, y_start), (x_start + cx, y_start + panel_h), (255, 255, 255), 1)
+        cv2.line(frame, (x_start + cx, y_start), (x_start + cx, y_start + panel_h), (80, 80, 80), 1)
         
         # 当前点
         ele, _ = self._get_ele_grade_at_time(current_seconds)
@@ -2908,14 +2914,14 @@ class VideoEditorApp:
             
             center = (x_start + cx, y_start + cy)
             cv2.circle(frame, center, 4, (0, 0, 255), -1)
-            cv2.circle(frame, center, 5, (255, 255, 255), 1)
+            cv2.circle(frame, center, 5, (80, 80, 80), 1)
             
             text = f"{ele:.0f}m"
             cv2.putText(frame, text, (x_start + cx + 8, y_start + cy), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
             
             cv2.putText(frame, "Elevation", (x_start + 5, y_start + 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1, cv2.LINE_AA)
                     
     def _draw_local_track_view(self, frame, current_seconds):
         """绘制局部跟随视角轨迹"""
