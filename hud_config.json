@@ -144,7 +144,7 @@
             ],
             "view_size_ratio": 0.3,
             "cam_behind_m": 100.0,
-            "scale_factor": 0.7,
+            "scale_factor": 0.9,
             "margin_top": 20,
             "margin_right": 20,
             "font_thickness": 1.0,
@@ -164,7 +164,7 @@
             ],
             "font_scale": 1.0,
             "line_thickness": 2,
-            "visible": false,
+            "visible": true,
             "ring_color": [
                 245,
                 245,
