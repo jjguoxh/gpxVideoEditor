@@ -14,23 +14,23 @@
     "hud_panels": {
         "elevation": {
             "bg_color": [
-                192,
-                192,
-                192
+                255,
+                255,
+                255
             ],
             "text_color": [
                 255,
                 255,
                 255
             ],
-            "font_scale": 1.0,
+            "font_scale": 0.5,
             "line_thickness": 2,
             "visible": true,
-            "bg_alpha": 0.4,
+            "bg_alpha": 0.2,
             "fill_color": [
-                220,
-                220,
-                220
+                190,
+                253,
+                187
             ],
             "line_color": [
                 60,
@@ -46,7 +46,9 @@
                 0,
                 0,
                 255
-            ]
+            ],
+            "font_thickness": 1.0,
+            "scale_ratio": 0.5
         },
         "telemetry": {
             "bg_color": [
@@ -97,7 +99,10 @@
                 100,
                 100
             ],
-            "max_speed": 60.0
+            "max_speed": 60.0,
+            "font_thickness": 1.0,
+            "bg_alpha": 0.7,
+            "scale_ratio": 1.0
         },
         "track": {
             "bg_color": [
@@ -139,9 +144,12 @@
             ],
             "view_size_ratio": 0.3,
             "cam_behind_m": 100.0,
-            "scale_factor": 350.0,
+            "scale_factor": 0.7,
             "margin_top": 20,
-            "margin_right": 20
+            "margin_right": 20,
+            "font_thickness": 1.0,
+            "bg_alpha": 0.7,
+            "scale_ratio": 1.0
         },
         "speedometer": {
             "bg_color": [
@@ -156,7 +164,7 @@
             ],
             "font_scale": 1.0,
             "line_thickness": 2,
-            "visible": true,
+            "visible": false,
             "ring_color": [
                 245,
                 245,
@@ -181,7 +189,46 @@
             "size_ratio": 0.24,
             "margin_left": 24,
             "margin_bottom": 140,
-            "max_speed": 60.0
+            "max_speed": 60.0,
+            "font_thickness": 1.0,
+            "scale_ratio": 1.0
+        },
+        "porsche911": {
+            "bg_color": [
+                200,
+                200,
+                200
+            ],
+            "text_color": [
+                255,
+                255,
+                255
+            ],
+            "font_scale": 1.0,
+            "line_thickness": 2,
+            "visible": false,
+            "bg_image_path": "E:\\project\\gpxVideoEditor\\proto\\hud\\911.png",
+            "size_ratio": 0.35,
+            "margin_left": 40,
+            "margin_bottom": 60,
+            "max_speed": 300.0,
+            "needle_color_light": [
+                240,
+                240,
+                240
+            ],
+            "needle_color_dark": [
+                160,
+                160,
+                160
+            ],
+            "inpaint_enabled": true,
+            "inpaint_radius_ratio": 0.45,
+            "inpaint_angle": 135.0,
+            "inpaint_wedge_width": 10.0,
+            "font_thickness": 1.0,
+            "bg_alpha": 0.7,
+            "scale_ratio": 1.0
         }
     }
 }

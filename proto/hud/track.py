@@ -65,7 +65,11 @@ class TrackPanel(HudPanel):
             x_offset = w - view_size - self.config.get('margin_right', 20)
             y_offset = self.config.get('margin_top', 20)
         
-        scale = view_size / self.config['scale_factor']
+        scale_factor = float(self.config.get('scale_factor', 350.0))
+        if scale_factor <= 5.0:
+            scale = max(scale_factor, 0.05)
+        else:
+            scale = view_size / scale_factor
         cam_behind_m = self.config['cam_behind_m']
         
         # Create transparent overlay
