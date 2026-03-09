@@ -23,11 +23,11 @@ import json
 import re
 import signal
 try:
-    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
+    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel
     from .hud_settings_dialog import HudSettingsDialog
 except ImportError:
     # Fallback for running as a script
-    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel
+    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel
     from hud_settings_dialog import HudSettingsDialog
 
 # 尝试导入numpy用于错误处理
@@ -205,7 +205,8 @@ class VideoEditorApp:
             'elevation': ElevationPanel(),
             'telemetry': TelemetryPanel(),
             'track': TrackPanel(),
-            'speedometer': SpeedometerPanel()
+            'speedometer': SpeedometerPanel(),
+            'porsche911': Porsche911Panel()
         }
 
         # 创建GUI
