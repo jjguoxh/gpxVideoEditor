@@ -193,6 +193,13 @@ class VideoEditorApp:
         self.telemetry_drag_start = None
         self.telemetry_resize_margin = 16
         self.display_frame_rect = None  # (x0, y0, w, h) in canvas px
+        self.video_canvas_image_item = None
+        self._frame_gpx_cache = None
+        self._last_gpx_seg_idx = 0
+        self._align_redraw_pending = False
+        self.debug_overlay_enabled = True
+        self.debug_overlay_interval = 0.12
+        self._last_debug_overlay_draw_ts = 0.0
         
         # Speedometer Panel State
         self.speedometer_rect_rel = [0.05, 0.65, 0.20, 0.20] # x_frac, y_frac, w_frac, h_frac (Square-ish aspect ratio handled in draw)
@@ -795,7 +802,7 @@ class VideoEditorApp:
             self.align_offset_y = my - (my - self.align_offset_y) * scale_factor
             
             self.align_zoom_scale = new_zoom
-            self.update_align_canvas()
+            self._request_align_canvas_update()
             
     def on_align_spinbox_change(self, event=None):
         """处理 Spinbox 变化"""
@@ -821,6 +828,18 @@ class VideoEditorApp:
         self.align_offset_y += dy
         
         self.align_drag_start = (event.x, event.y)
+        self._request_align_canvas_update()
+
+    def _request_align_canvas_update(self):
+        if not hasattr(self, 'align_canvas'):
+            return
+        if self._align_redraw_pending:
+            return
+        self._align_redraw_pending = True
+        self.root.after(16, self._flush_align_canvas_update)
+
+    def _flush_align_canvas_update(self):
+        self._align_redraw_pending = False
         self.update_align_canvas()
 
     def on_align_right_click(self, event):
@@ -2049,69 +2068,20 @@ class VideoEditorApp:
         if not self.gpx_data:
             self.debug_info = {'status': 'No Data'}
             return 0.0, 0, None, None
-            
-        # 仅处理 GPX 段结构
-        if isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data:
-            segments = self.gpx_data['segments']
-            if not segments:
-                return 0.0, 0, None, None
-            
-            # 应用时间偏移
-            target_time = current_seconds + self.gpx_offset
-            
-            self.debug_info['target_time'] = target_time
-            self.debug_info['offset'] = self.gpx_offset
-            
-            # 二分查找
-            low = 0
-            high = len(segments) - 1
-            
-            while low <= high:
-                mid = (low + high) // 2
-                seg = segments[mid]
-                if seg['start'] <= target_time <= seg['end']:
-                    # 线性插值计算坐标
-                    duration = seg['end'] - seg['start']
-                    ratio = 0.0
-                    if duration > 0.001:
-                        ratio = (target_time - seg['start']) / duration
-                        lat = seg['lat_start'] + (seg['lat_end'] - seg['lat_start']) * ratio
-                        lon = seg['lon_start'] + (seg['lon_end'] - seg['lon_start']) * ratio
-                    else:
-                        lat = seg['lat_start']
-                        lon = seg['lon_start']
-                    
-                    self.debug_info['seg_idx'] = mid
-                    self.debug_info['seg_start'] = seg['start']
-                    self.debug_info['seg_end'] = seg['end']
-                    self.debug_info['ratio'] = ratio
-                    self.debug_info['lat'] = lat
-                    self.debug_info['lon'] = lon
-                    
-                    return seg['speed'], seg.get('hr', 0), lat, lon
-                elif seg['start'] > target_time:
-                    high = mid - 1
-                else:
-                    low = mid + 1
-                    
-            # 如果超出范围，返回最近的数据或者默认值
-            if target_time < segments[0]['start']:
-                s = segments[0]
-                self.debug_info['status'] = 'Before Start'
-                self.debug_info['seg_idx'] = 0
-                self.debug_info['lat'] = s.get('lat_start')
-                return s['speed'], s.get('hr', 0), s.get('lat_start'), s.get('lon_start')
-            if target_time > segments[-1]['end']:
-                s = segments[-1]
-                self.debug_info['status'] = 'After End'
-                self.debug_info['seg_idx'] = len(segments) - 1
-                self.debug_info['lat'] = s.get('lat_end')
-                return s['speed'], s.get('hr', 0), s.get('lat_end'), s.get('lon_end')
-                
+        target_time = current_seconds + self.gpx_offset
+        sample = self._sample_gpx_segment(target_time)
+        if sample is None:
             self.debug_info['status'] = 'Not Found'
             return 0.0, 0, None, None
-            
-        return 0.0, 0, None, None
+        # self.debug_info['target_time'] = target_time
+        # self.debug_info['offset'] = self.gpx_offset
+        # self.debug_info['seg_idx'] = sample['idx']
+        # self.debug_info['seg_start'] = sample['seg']['start']
+        # self.debug_info['seg_end'] = sample['seg']['end']
+        # self.debug_info['ratio'] = sample['ratio']
+        # self.debug_info['lat'] = sample['lat']
+        # self.debug_info['lon'] = sample['lon']
+        return sample['speed'], sample['hr'], sample['lat'], sample['lon']
 
     def decrease_offset(self, event=None):
         """减少GPX时间偏移"""
@@ -2699,12 +2669,15 @@ class VideoEditorApp:
             # 转换为 ImageTk (必须在主线程)
             photo = ImageTk.PhotoImage(image=image)
             
-            # 更新画布
-            self.video_canvas.delete("all")
-            # 居中显示
             x_center = canvas_width // 2
             y_center = canvas_height // 2
-            self.video_canvas.create_image(x_center, y_center, image=photo, anchor=tk.CENTER)
+            if self.video_canvas_image_item is None:
+                self.video_canvas_image_item = self.video_canvas.create_image(
+                    x_center, y_center, image=photo, anchor=tk.CENTER
+                )
+            else:
+                self.video_canvas.coords(self.video_canvas_image_item, x_center, y_center)
+                self.video_canvas.itemconfig(self.video_canvas_image_item, image=photo)
             self.video_canvas.image = photo # 保持引用防止被垃圾回收
             
             # 记录当前帧在画布的位置和大小，供鼠标拖放使用
@@ -2943,7 +2916,26 @@ class VideoEditorApp:
         if not self.gpx_data:
             return
 
-        speed, hr, lat, lon = self.get_data_at_time(current_seconds)
+        target_time = current_seconds + self.gpx_offset
+        sample = self._sample_gpx_segment(target_time)
+        if sample is None:
+            speed, hr, lat, lon = 0.0, 0, None, None
+            ele, grade = None, None
+        else:
+            speed = sample['speed']
+            hr = sample['hr']
+            lat = sample['lat']
+            lon = sample['lon']
+            ele = sample['ele']
+            grade = sample['grade']
+            # self.debug_info['target_time'] = target_time
+            # self.debug_info['offset'] = self.gpx_offset
+            # self.debug_info['seg_idx'] = sample['idx']
+            # self.debug_info['seg_start'] = sample['seg']['start']
+            # self.debug_info['seg_end'] = sample['seg']['end']
+            # self.debug_info['ratio'] = sample['ratio']
+            # self.debug_info['lat'] = lat
+            # self.debug_info['lon'] = lon
         h, w = frame.shape[:2]
         
         # --- 1. Draw Track Panel ---
@@ -2963,7 +2955,6 @@ class VideoEditorApp:
         self.hud_panels['track'].draw(frame, track_context)
 
         # --- 2. Draw Telemetry Panel ---
-        ele, grade = self._get_ele_grade_at_time(current_seconds)
         telemetry_rect = self._get_telemetry_rect_px(w, h)
         
         telemetry_context = {
@@ -2994,77 +2985,119 @@ class VideoEditorApp:
         }
         self.hud_panels['elevation'].draw(frame, ele_context)
 
-        # 4. 显示调试信息 (始终显示在左上角)
-        debug_y = 40
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = max(0.5, w / 1000.0)
-        thickness = max(1, int(font_scale * 2))
-        
-        # 如果有偏移，优先显示
-        if abs(self.gpx_offset) > 0.1:
-            text_offset = f"Offset: {self.gpx_offset:+.1f}s"
-            cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (255, 255, 0), thickness)
-            debug_y += 30
-        
-        if self.debug_info:
-            for k, v in self.debug_info.items():
-                # 跳过已经显示的offset
-                if k == 'offset': continue
-                
-                if isinstance(v, float):
-                    text = f"{k}: {v:.3f}"
-                else:
-                    text = f"{k}: {v}"
-                
-                # 黑色描边
-                cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
-                # 红色文字
-                cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                debug_y += 25
+        should_draw_debug = self.debug_overlay_enabled and (
+            (not self.playing) or (time.monotonic() - self._last_debug_overlay_draw_ts >= self.debug_overlay_interval)
+        )
+        if should_draw_debug:
+            self._last_debug_overlay_draw_ts = time.monotonic()
+            debug_y = 40
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = max(0.5, w / 1000.0)
+            thickness = max(1, int(font_scale * 2))
+            
+            if abs(self.gpx_offset) > 0.1:
+                text_offset = f"Offset: {self.gpx_offset:+.1f}s"
+                cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (0, 0, 0), thickness + 2)
+                cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (255, 255, 0), thickness)
+                debug_y += 30
+            
+            if self.debug_info:
+                for k, v in self.debug_info.items():
+                    if k == 'offset':
+                        continue
+                    if isinstance(v, float):
+                        text = f"{k}: {v:.3f}"
+                    else:
+                        text = f"{k}: {v}"
+                    cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
+                    cv2.putText(frame, text, (20, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    debug_y += 25
 
-    def _get_ele_grade_at_time(self, current_seconds):
+    def _sample_gpx_segment(self, target_time):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data):
-            return None, None
+            return None
         segs = self.gpx_data['segments']
         if not segs:
-            return None, None
-        t = current_seconds + self.gpx_offset
-        low, high = 0, len(segs) - 1
+            return None
+        cache = self._frame_gpx_cache
+        if cache and abs(cache['target_time'] - target_time) < 1e-6:
+            return cache
         idx = None
-        while low <= high:
-            mid = (low + high) // 2
-            s = segs[mid]
-            if s['start'] <= t <= s['end']:
-                idx = mid
-                break
-            if t < s['start']:
-                high = mid - 1
-            else:
-                low = mid + 1
+        last_idx = self._last_gpx_seg_idx
+        if 0 <= last_idx < len(segs):
+            s = segs[last_idx]
+            if s['start'] <= target_time <= s['end']:
+                idx = last_idx
+            elif last_idx + 1 < len(segs):
+                s_next = segs[last_idx + 1]
+                if s_next['start'] <= target_time <= s_next['end']:
+                    idx = last_idx + 1
+            if idx is None and last_idx - 1 >= 0:
+                s_prev = segs[last_idx - 1]
+                if s_prev['start'] <= target_time <= s_prev['end']:
+                    idx = last_idx - 1
         if idx is None:
-            return None, None
+            if target_time <= segs[0]['start']:
+                idx = 0
+            elif target_time >= segs[-1]['end']:
+                idx = len(segs) - 1
+            else:
+                low, high = 0, len(segs) - 1
+                while low <= high:
+                    mid = (low + high) // 2
+                    s = segs[mid]
+                    if s['start'] <= target_time <= s['end']:
+                        idx = mid
+                        break
+                    if target_time < s['start']:
+                        high = mid - 1
+                    else:
+                        low = mid + 1
+        if idx is None:
+            return None
         seg = segs[idx]
-        dur = seg['end'] - seg['start']
+        duration = seg['end'] - seg['start']
         ratio = 0.0
-        if dur > 0.001:
-            ratio = (t - seg['start']) / dur
-        ele_s = seg.get('ele_start', None)
-        ele_e = seg.get('ele_end', None)
+        if duration > 0.001:
+            ratio = (target_time - seg['start']) / duration
+        ratio = max(0.0, min(1.0, ratio))
+        lat = seg['lat_start'] + (seg['lat_end'] - seg['lat_start']) * ratio
+        lon = seg['lon_start'] + (seg['lon_end'] - seg['lon_start']) * ratio
+        ele_s = seg.get('ele_start')
+        ele_e = seg.get('ele_end')
         ele = None
         if ele_s is not None and ele_e is not None:
             ele = ele_s + (ele_e - ele_s) * ratio
-        # 坡度（%）
+        grade = None
         lat1, lon1 = seg.get('lat_start'), seg.get('lon_start')
         lat2, lon2 = seg.get('lat_end'), seg.get('lon_end')
-        grade = None
         if None not in (lat1, lon1, lat2, lon2) and ele_s is not None and ele_e is not None:
             dist = self._haversine_distance(lat1, lon1, lat2, lon2)
             if dist > 1:
                 grade = (ele_e - ele_s) / dist * 100.0
             else:
                 grade = 0.0
-        return ele, grade
+        sample = {
+            'target_time': target_time,
+            'idx': idx,
+            'seg': seg,
+            'ratio': ratio,
+            'lat': lat,
+            'lon': lon,
+            'speed': seg['speed'],
+            'hr': seg.get('hr', 0),
+            'ele': ele,
+            'grade': grade
+        }
+        self._last_gpx_seg_idx = idx
+        self._frame_gpx_cache = sample
+        return sample
+
+    def _get_ele_grade_at_time(self, current_seconds):
+        sample = self._sample_gpx_segment(current_seconds + self.gpx_offset)
+        if sample is None:
+            return None, None
+        return sample['ele'], sample['grade']
     
     def _update_time_display(self, current_time):
         """更新时间显示（在主线程中调用）"""
