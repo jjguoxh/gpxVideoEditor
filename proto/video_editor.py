@@ -2996,9 +2996,9 @@ class VideoEditorApp:
             thickness = max(1, int(font_scale * 2))
             
             if abs(self.gpx_offset) > 0.1:
-                text_offset = f"Offset: {self.gpx_offset:+.1f}s"
-                cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (0, 0, 0), thickness + 2)
-                cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (255, 255, 0), thickness)
+                # text_offset = f"Offset: {self.gpx_offset:+.1f}s"
+                # cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (0, 0, 0), thickness + 2)
+                # cv2.putText(frame, text_offset, (20, debug_y), font, font_scale * 0.8, (255, 255, 0), thickness)
                 debug_y += 30
             
             if self.debug_info:

@@ -134,7 +134,6 @@ class TelemetryPanel(HudPanel):
     def _draw_hex_stat(self, frame, center, radius, value, label):
         """Draw hexagon status display (HUD component)"""
         cx, cy = center
-        # Generate hexagon vertices (point up)
         pts = []
         for i in range(6):
             angle_deg = 60 * i + 30
@@ -144,29 +143,33 @@ class TelemetryPanel(HudPanel):
             pts.append([px, py])
             
         pts = np.array(pts, np.int32).reshape((-1, 1, 2))
-        
-        # 1. Semi-transparent fill
-        overlay = frame.copy()
-        cv2.fillPoly(overlay, [pts], self.config['bg_color']) 
-        # Blend mode: overlay * 0.3 + frame * 0.7
-        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
-        
-        # 2. Border
-        cv2.polylines(frame, [pts], True, self.config['line_color'], 2, cv2.LINE_AA)
-        
-        # 3. Text
+
+        h, w = frame.shape[:2]
+        x0 = max(0, int(cx - radius - 4))
+        y0 = max(0, int(cy - radius - 4))
+        x1 = min(w, int(cx + radius + 5))
+        y1 = min(h, int(cy + radius + 5))
+        if x1 <= x0 or y1 <= y0:
+            return
+
+        roi = frame[y0:y1, x0:x1]
+        local_pts = pts.copy()
+        local_pts[:, :, 0] -= x0
+        local_pts[:, :, 1] -= y0
+
+        overlay = roi.copy()
+        cv2.fillPoly(overlay, [local_pts], self.config['bg_color'])
+        cv2.addWeighted(overlay, 0.3, roi, 0.7, 0, roi)
+        cv2.polylines(roi, [local_pts], True, self.config['line_color'], 2, cv2.LINE_AA)
+
         font = cv2.FONT_HERSHEY_SIMPLEX
-        
-        # Value (Centered)
-        # Dynamic font size (smaller, /45 instead of /30)
         font_scale_val = radius / 45.0 * self.config.get('font_scale', 1.0)
         if font_scale_val < 0.35: font_scale_val = 0.35
         
         thickness = max(1, int(font_scale_val * 2))
         (tw, th), base = cv2.getTextSize(str(value), font, font_scale_val, thickness)
         cv2.putText(frame, str(value), (int(cx - tw/2), int(cy + th/2)), font, font_scale_val, self.config['text_color_val'], thickness, cv2.LINE_AA)
-        
-        # Label (Bottom)
+
         font_scale_lbl = radius / 50.0 * self.config.get('font_scale', 1.0)
         if font_scale_lbl < 0.3: font_scale_lbl = 0.3
         
