@@ -7,21 +7,20 @@ import math
 import sys
 from pathlib import Path
 from PIL import Image, ImageTk
+import importlib.util
+import types
 
 # Add HUD directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load HUD modules
 try:
     from hud.base import HudPanel
-    from hud.elevation import ElevationPanel
-    from hud.telemetry import TelemetryPanel
-    from hud.speedometer import SpeedometerPanel
-    from hud.track import TrackPanel
-    from hud.porsche911 import Porsche911Panel
+    import hud.base as hud_base_module
 except ImportError as e:
     print(f"Import error: {e}")
     sys.exit(1)
+
+HUD_ROOT = Path(__file__).resolve().parent
 
 class MockDataGenerator:
     def __init__(self, duration=600):
@@ -120,6 +119,81 @@ class MockDataGenerator:
             'smooth_lons': np.array(self.lons)
         }
 
+def _ensure_hud_subpackage(subdir_path: Path):
+    pkg_name = f"hud.{subdir_path.name}"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [str(subdir_path)]
+        sys.modules[pkg_name] = pkg
+    sys.modules[f"{pkg_name}.base"] = hud_base_module
+    return pkg_name
+
+def _load_module_from_file(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load spec for {module_name} from {file_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+def _find_panel_classes(module):
+    panel_classes = []
+    for obj in module.__dict__.values():
+        if isinstance(obj, type) and issubclass(obj, HudPanel) and obj is not HudPanel:
+            panel_classes.append(obj)
+    panel_classes.sort(key=lambda c: c.__name__)
+    return panel_classes
+
+def discover_hud_panels():
+    discovered = []
+    for subdir in sorted([p for p in HUD_ROOT.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        if subdir.name.startswith('__'):
+            continue
+        if subdir.name in ('.git', '.venv'):
+            continue
+
+        py_files = sorted(
+            [p for p in subdir.glob("*.py") if p.is_file() and p.name not in ("__init__.py", "base.py")],
+            key=lambda p: p.name.lower()
+        )
+        if not py_files:
+            continue
+
+        pkg_name = _ensure_hud_subpackage(subdir)
+        for py_file in py_files:
+            module_name = f"{pkg_name}.{py_file.stem}"
+            try:
+                module = _load_module_from_file(module_name, py_file)
+                panel_classes = _find_panel_classes(module)
+                if not panel_classes:
+                    discovered.append({
+                        'group': subdir.name,
+                        'module': py_file.stem,
+                        'panel_name': None,
+                        'panel': None,
+                        'error': f"No HudPanel subclass found in {py_file.name}"
+                    })
+                    continue
+                panel_cls = panel_classes[0]
+                panel = panel_cls()
+                discovered.append({
+                    'group': subdir.name,
+                    'module': py_file.stem,
+                    'panel_name': panel_cls.__name__,
+                    'panel': panel,
+                    'error': None
+                })
+            except Exception as e:
+                discovered.append({
+                    'group': subdir.name,
+                    'module': py_file.stem,
+                    'panel_name': None,
+                    'panel': None,
+                    'error': str(e)
+                })
+    return discovered
+
 class HUDTestApp:
     def __init__(self, root):
         self.root = root
@@ -139,15 +213,12 @@ class HUDTestApp:
         self.frame_width = 1280
         self.frame_height = 720
         self.bg_color = (50, 50, 50) # Dark gray background
-        
-        # Initialize HUD panels
-        self.hud_panels = {
-            'speedometer': SpeedometerPanel(),
-            'porsche911': Porsche911Panel(),
-            'elevation': ElevationPanel(),
-            'telemetry': TelemetryPanel(),
-            'track': TrackPanel()
-        }
+
+        self.hud_entries = discover_hud_panels()
+        self._ui_pages = {}
+        self._active_canvas = None
+        self._active_panel = None
+        self._active_error = None
         
         # Create UI
         self.create_ui()
@@ -160,15 +231,6 @@ class HUDTestApp:
         # Top control frame
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        # Panel Selection
-        ttk.Label(control_frame, text="Active Panel:").pack(side=tk.LEFT)
-        self.panel_var = tk.StringVar(value='speedometer')
-        
-        for name in self.hud_panels.keys():
-            rb = ttk.Radiobutton(control_frame, text=name.capitalize(), 
-                               variable=self.panel_var, value=name)
-            rb.pack(side=tk.LEFT, padx=5)
             
         # Simulation Controls
         sim_frame = ttk.LabelFrame(self.root, text="Simulation Control")
@@ -190,24 +252,80 @@ class HUDTestApp:
                                           command=lambda v: setattr(self, 'simulated_speed_factor', float(v)))
         self.speed_factor_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
-        # Canvas for preview
-        self.canvas_frame = ttk.Frame(self.root)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        self.canvas = tk.Canvas(self.canvas_frame, bg='black')
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        
-        # Bind resize event
-        self.canvas.bind('<Configure>', self.on_resize)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        groups = {}
+        for entry in self.hud_entries:
+            groups.setdefault(entry['group'], []).append(entry)
+
+        for group_name in sorted(groups.keys(), key=lambda s: s.lower()):
+            group_frame = ttk.Frame(self.notebook)
+            self.notebook.add(group_frame, text=group_name)
+
+            inner = ttk.Notebook(group_frame)
+            inner.pack(fill=tk.BOTH, expand=True)
+
+            for entry in sorted(groups[group_name], key=lambda e: e['module'].lower()):
+                tab_title = entry['module']
+                tab_frame = ttk.Frame(inner)
+                inner.add(tab_frame, text=tab_title)
+
+                canvas = tk.Canvas(tab_frame, bg='black')
+                canvas.pack(fill=tk.BOTH, expand=True)
+                canvas.bind('<Configure>', self.on_resize)
+
+                error_label = ttk.Label(tab_frame, text="", foreground="red")
+                error_label.pack(anchor=tk.W, padx=8, pady=6)
+
+                self._ui_pages[(group_name, entry['module'])] = {
+                    'canvas': canvas,
+                    'image_item': None,
+                    'photo': None,
+                    'panel': entry['panel'],
+                    'error': entry['error'],
+                    'error_label': error_label
+                }
+
+            inner.bind("<<NotebookTabChanged>>", lambda e: self._refresh_active_page())
+
+        self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._refresh_active_page())
+        self.root.after(0, self._refresh_active_page)
         
     def toggle_play(self):
         self.is_playing = not self.is_playing
         self.play_btn.config(text="Pause" if self.is_playing else "Play")
         
     def on_resize(self, event):
-        # Just store the size, the update loop will handle scaling
-        self.canvas_width = event.width
-        self.canvas_height = event.height
+        pass
+
+    def _refresh_active_page(self):
+        try:
+            group_tab_id = self.notebook.select()
+            if not group_tab_id:
+                return
+            group_frame = self.root.nametowidget(group_tab_id)
+            inner = None
+            for child in group_frame.winfo_children():
+                if isinstance(child, ttk.Notebook):
+                    inner = child
+                    break
+            if inner is None:
+                return
+            module_tab_id = inner.select()
+            if not module_tab_id:
+                return
+            module_title = inner.tab(module_tab_id, "text")
+            group_title = self.notebook.tab(group_tab_id, "text")
+            page = self._ui_pages.get((group_title, module_title))
+            if not page:
+                return
+            self._active_canvas = page['canvas']
+            self._active_panel = page['panel']
+            self._active_error = page['error']
+            page['error_label'].config(text=page['error'] or "")
+        except Exception:
+            pass
         
     def update_loop(self):
         now = time.time()
@@ -228,35 +346,22 @@ class HUDTestApp:
         # Prepare frame
         frame = np.full((self.frame_height, self.frame_width, 3), self.bg_color, dtype=np.uint8)
         
-        # Draw selected panel
-        panel_name = self.panel_var.get()
-        panel = self.hud_panels.get(panel_name)
-        
-        if panel:
-            # We can define a rect for the panel to simulate layout
-            # For testing, let's give it a reasonable area or full screen depending on panel
-            # Some panels use 'rect' from context, others use internal config
-            
-            # Let's try to simulate the layout rect used in the main app
-            # Center the panel
+        canvas = self._active_canvas
+        panel = self._active_panel
+        if panel is not None and canvas is not None and not self._active_error:
             margin = 50
             w = self.frame_width - 2 * margin
             h = self.frame_height - 2 * margin
-            
-            # Update context with rect
             context['rect'] = (margin, margin, w, h)
-            
             try:
                 panel.draw(frame, context)
-            except Exception as e:
-                print(f"Error drawing {panel_name}: {e}")
-                import traceback
-                traceback.print_exc()
+            except Exception:
+                pass
 
         # Convert to ImageTk
         # Resize to fit canvas
-        c_w = self.canvas.winfo_width()
-        c_h = self.canvas.winfo_height()
+        c_w = canvas.winfo_width() if canvas is not None else 0
+        c_h = canvas.winfo_height() if canvas is not None else 0
         
         if c_w > 1 and c_h > 1:
             scale = min(c_w / self.frame_width, c_h / self.frame_height)
@@ -266,20 +371,35 @@ class HUDTestApp:
             resized = cv2.resize(frame, (new_w, new_h))
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
-            self.photo = ImageTk.PhotoImage(image=img)
-            
-            self.canvas.delete("all")
-            # Center image
+            photo = ImageTk.PhotoImage(image=img)
             x = (c_w - new_w) // 2
             y = (c_h - new_h) // 2
-            self.canvas.create_image(x, y, anchor=tk.NW, image=self.photo)
-            
-            # Draw debug info
-            self.canvas.create_text(10, 10, anchor=tk.NW, fill='white', 
-                                  text=f"Time: {self.current_time:.1f}s / {self.mock_data.duration:.1f}s\n"
-                                       f"Speed: {context['speed']:.1f} km/h\n"
-                                       f"Ele: {context['ele']:.1f} m\n"
-                                       f"Grade: {context['grade']:.1f} %")
+
+            page = None
+            try:
+                group_tab_id = self.notebook.select()
+                group_title = self.notebook.tab(group_tab_id, "text") if group_tab_id else None
+                group_frame = self.root.nametowidget(group_tab_id) if group_tab_id else None
+                inner = None
+                if group_frame is not None:
+                    for child in group_frame.winfo_children():
+                        if isinstance(child, ttk.Notebook):
+                            inner = child
+                            break
+                module_tab_id = inner.select() if inner is not None else None
+                module_title = inner.tab(module_tab_id, "text") if module_tab_id else None
+                if group_title and module_title:
+                    page = self._ui_pages.get((group_title, module_title))
+            except Exception:
+                page = None
+
+            if page is not None:
+                page['photo'] = photo
+                if page['image_item'] is None:
+                    page['image_item'] = canvas.create_image(x, y, anchor=tk.NW, image=photo)
+                else:
+                    canvas.coords(page['image_item'], x, y)
+                    canvas.itemconfig(page['image_item'], image=photo)
         
         # Schedule next update (30 FPS)
         self.root.after(33, self.update_loop)
