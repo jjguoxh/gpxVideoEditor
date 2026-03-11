@@ -22,6 +22,7 @@ class WhiteSpeedPanel(HudPanel):
             "sweep_angle": 270.0,
             "needle_color": (0, 0, 220),
             "needle_outline_color": (0, 0, 120),
+            "needle_len_mult": 1.7,
             "show_digital": False,
             "digital_color": (30, 30, 30),
             "unit_color": (80, 80, 80),
@@ -213,7 +214,7 @@ class WhiteSpeedPanel(HudPanel):
         needle_angle = start_angle + sweep_angle * ratio
 
         dial_r = int(target_h * float(self.config.get("dial_radius_ratio", 0.40)))
-        needle_len = int(dial_r * 0.92)
+        needle_len = int(dial_r * 0.92 * float(self.config.get("needle_len_mult", 1.7)))
         needle_w = max(2, int(dial_r * 0.06))
         left_center_ratio = self.config.get("dial_left_center", (0.25, 0.5))
         right_center_ratio = self.config.get("dial_right_center", (0.75, 0.5))
