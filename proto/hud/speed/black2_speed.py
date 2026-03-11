@@ -21,14 +21,51 @@ class Black2SpeedPanel(HudPanel):
             "sweep_angle": 260.0,
             "digital_color": (245, 245, 245),
             "unit_color": (180, 180, 180),
-            "led_active_color": (0, 230, 120),
-            "led_inactive_color": (40, 70, 40),
+            "led_color_low": (90, 255, 140),
+            "led_color_mid": (0, 165, 255),
+            "led_color_high": (0, 0, 255),
+            "led_mid_ratio": 0.7,
+            "led_inactive_brightness": 0.14,
+            "led_active_brightness_min": 0.55,
+            "led_active_brightness_max": 1.0,
+            "led_trail_count": 14,
             "led_count": 72,
             "led_ring_radius_ratio": 0.42,
             "led_radius_ratio": 0.014
         })
         self.bg_image = None
         self.bg_cache = {}
+
+    @staticmethod
+    def _lerp_color(c1, c2, a):
+        a = float(a)
+        return (
+            int(round(c1[0] + (c2[0] - c1[0]) * a)),
+            int(round(c1[1] + (c2[1] - c1[1]) * a)),
+            int(round(c1[2] + (c2[2] - c1[2]) * a)),
+        )
+
+    def _led_color_for_ratio(self, t):
+        c0 = self.config.get("led_color_low", (90, 255, 140))
+        c1 = self.config.get("led_color_mid", (0, 165, 255))
+        c2 = self.config.get("led_color_high", (0, 0, 255))
+        mid = float(self.config.get("led_mid_ratio", 0.7))
+        if mid <= 0.0:
+            return self._lerp_color(c0, c2, t)
+        if t <= mid:
+            a = t / mid
+            return self._lerp_color(c0, c1, a)
+        a = (t - mid) / max(1e-6, (1.0 - mid))
+        return self._lerp_color(c1, c2, a)
+
+    @staticmethod
+    def _scale_color(color_bgr, brightness):
+        b = max(0.0, min(1.0, float(brightness)))
+        return (
+            int(max(0, min(255, round(color_bgr[0] * b)))),
+            int(max(0, min(255, round(color_bgr[1] * b)))),
+            int(max(0, min(255, round(color_bgr[2] * b)))),
+        )
 
     def _load_bg(self, size):
         cached = self.bg_cache.get(size)
@@ -104,12 +141,26 @@ class Black2SpeedPanel(HudPanel):
         ring_r = int(size * float(self.config.get("led_ring_radius_ratio", 0.42)))
         led_r = max(1, int(size * float(self.config.get("led_radius_ratio", 0.014))))
         active_n = int(round(ratio * led_count))
+        inactive_b = float(self.config.get("led_inactive_brightness", 0.14))
+        bmin = float(self.config.get("led_active_brightness_min", 0.55))
+        bmax = float(self.config.get("led_active_brightness_max", 1.0))
+        trail_n = max(1, int(self.config.get("led_trail_count", 14)))
         for i in range(led_count):
             t = i / max(1, led_count - 1)
             ang = math.radians(start_angle + sweep_angle * t)
             px = int(cx + ring_r * math.cos(ang))
             py = int(cy + ring_r * math.sin(ang))
-            color = self.config.get("led_active_color", (0, 230, 120)) if i < active_n else self.config.get("led_inactive_color", (40, 70, 40))
+            base_color = self._led_color_for_ratio(t)
+            if i < active_n:
+                edge = max(0, active_n - 1)
+                d = edge - i
+                if d <= trail_n:
+                    bright = bmax - (bmax - bmin) * (d / float(trail_n))
+                else:
+                    bright = bmin
+                color = self._scale_color(base_color, bright)
+            else:
+                color = self._scale_color(base_color, inactive_b)
             cv2.circle(roi, (px, py), led_r, color, -1, cv2.LINE_AA)
         font = cv2.FONT_HERSHEY_SIMPLEX
         sp_text = f"{int(round(speed))}"
