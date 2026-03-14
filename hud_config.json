@@ -208,6 +208,7 @@
             "line_thickness": 2,
             "visible": false,
             "bg_image_path": "E:\\project\\gpxVideoEditor\\proto\\hud\\911.png",
+            "bg_clean_image_path": "e:\\project\\gpxVideoEditor\\proto\\hud\\speed\\911x.png",
             "size_ratio": 0.35,
             "margin_left": 40,
             "margin_bottom": 60,

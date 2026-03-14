@@ -53,17 +53,6 @@ except ImportError:
     HAS_PIL = False
     print("警告: 未安装 Pillow，视频显示功能将受限。请运行: pip install Pillow")
 
-# 尝试导入 matplotlib 用于绘制图表
-try:
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    print("警告: 未安装 matplotlib，速度曲线图将不可用。请运行: pip install matplotlib")
-
 # 设置中文字体支持
 import platform
 if platform.system() == 'Windows':
@@ -566,9 +555,6 @@ class VideoEditorApp:
         self.align_transform = None
         self.thumbnail_canvas = None # Disable video thumbnail canvas
 
-        # 数据图表 (速度/海拔)
-        self.create_data_charts(parent)
-
         # 剪辑片段列表
         clip_frame = ttk.LabelFrame(parent, text="剪辑片段", padding=5)
         clip_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -597,92 +583,6 @@ class VideoEditorApp:
         
         self.clip_tree.bind('<Double-1>', self.on_clip_select)
 
-    def create_data_charts(self, parent):
-        """创建数据图表 (速度/海拔)"""
-        if not HAS_MATPLOTLIB:
-            return
-            
-        chart_frame = ttk.LabelFrame(parent, text="数据分析 (GPX)", padding=5)
-        chart_frame.pack(fill=tk.BOTH, expand=False, pady=5)
-        
-        # Matplotlib Figure (Two subplots)
-        self.chart_fig = Figure(figsize=(3, 3), dpi=100, facecolor='#f0f0f0')
-        
-        # Speed subplot (top)
-        self.speed_ax = self.chart_fig.add_subplot(211)
-        self.speed_ax.set_facecolor('#ffffff')
-        self.speed_line, = self.speed_ax.plot([], [], color='#1f77b4', linewidth=1)
-        self.speed_cursor = self.speed_ax.axvline(x=0, color='red', linestyle='--', linewidth=1)
-        self.speed_ax.set_ylabel('Speed (km/h)', fontsize=6)
-        self.speed_ax.tick_params(axis='both', which='major', labelsize=6)
-        self.speed_ax.grid(True, linestyle=':', alpha=0.5)
-        
-        # Elevation subplot (bottom, share x)
-        self.ele_ax = self.chart_fig.add_subplot(212, sharex=self.speed_ax)
-        self.ele_ax.set_facecolor('#ffffff')
-        self.ele_line, = self.ele_ax.plot([], [], color='#2ca02c', linewidth=1)
-        self.ele_cursor = self.ele_ax.axvline(x=0, color='red', linestyle='--', linewidth=1)
-        self.ele_ax.set_xlabel('Time (s)', fontsize=7)
-        self.ele_ax.set_ylabel('Ele (m)', fontsize=6)
-        self.ele_ax.tick_params(axis='both', which='major', labelsize=6)
-        self.ele_ax.grid(True, linestyle=':', alpha=0.5)
-        
-        self.chart_fig.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15, hspace=0.3)
-        
-        self.chart_canvas = FigureCanvasTkAgg(self.chart_fig, master=chart_frame)
-        self.chart_canvas.draw()
-        self.chart_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-    def update_data_charts(self):
-        """更新图表数据"""
-        if not HAS_MATPLOTLIB or not hasattr(self, 'speed_ax'):
-            return
-            
-        if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
-            self.speed_line.set_data([], [])
-            self.ele_line.set_data([], [])
-            self.chart_canvas.draw()
-            return
-            
-        # Extract data
-        times = []
-        speeds = []
-        eles = []
-        
-        for seg in self.gpx_data['segments']:
-            times.append(seg['start'])
-            speeds.append(seg['speed'])
-            eles.append(seg.get('ele_start', 0))
-        
-        if self.gpx_data['segments']:
-            last = self.gpx_data['segments'][-1]
-            times.append(last['end'])
-            speeds.append(last['speed'])
-            eles.append(last.get('ele_end', 0))
-
-        if times:
-            self.speed_line.set_data(times, speeds)
-            self.ele_line.set_data(times, eles)
-            
-            self.speed_ax.relim()
-            self.speed_ax.autoscale_view()
-            self.ele_ax.relim()
-            self.ele_ax.autoscale_view()
-            
-            self.chart_canvas.draw()
-            
-    def update_chart_cursors(self, current_gpx_time):
-        """更新图表游标位置"""
-        if not HAS_MATPLOTLIB or not hasattr(self, 'speed_cursor'):
-            return
-            
-        try:
-            self.speed_cursor.set_xdata([current_gpx_time, current_gpx_time])
-            self.ele_cursor.set_xdata([current_gpx_time, current_gpx_time])
-            self.chart_canvas.draw_idle()
-        except Exception:
-            pass
-    
     # def init_align_tab(self, parent):
     #     self.align_canvas = tk.Canvas(parent, bg="#1E1E1E", height=420, highlightthickness=0, bd=0)
     #     self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -757,10 +657,6 @@ class VideoEditorApp:
         self.align_progress_var.set(estimated_gpx_time)
         # self.align_time_label.config(text=f"GPX时间: {estimated_gpx_time:.1f}s")
         self.update_align_canvas()
-        
-        # 更新速度曲线光标
-        if hasattr(self, 'update_chart_cursors'):
-            self.update_chart_cursors(estimated_gpx_time)
     
     def reset_align_view(self):
         """重置轨迹预览视图"""
@@ -1006,7 +902,7 @@ class VideoEditorApp:
         slider_val = gpx_time
             
         # 更新变量（避免触发 on_align_progress_change 回调导致循环调用，或者接受它）
-        # on_align_progress_change 会调用 update_align_canvas 和 update_chart_cursors
+        # on_align_progress_change 会调用 update_align_canvas
         # 我们只想更新 UI 显示，不希望触发重绘
         # 但 Tkinter 的 set() 会触发 trace，这里使用的是 command 回调
         # Scale 的 command 回调只在用户交互时触发吗？通常是的，但在 set() 时不会触发 command
@@ -1075,10 +971,6 @@ class VideoEditorApp:
             v = 0.0
         # self.align_time_label.config(text=f"GPX时间: {v:.1f}s")
         self.update_align_canvas()
-        
-        # 更新图表光标
-        if hasattr(self, 'update_chart_cursors'):
-            self.update_chart_cursors(v)
     
     def align_confirm(self):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
@@ -1699,10 +1591,6 @@ class VideoEditorApp:
             
             # 平滑GPX数据
             self._smooth_gpx_data()
-            
-            # 更新速度曲线
-            if hasattr(self, 'update_data_charts'):
-                self.update_data_charts()
             
         except Exception as e:
             print(f"GPX加载失败: {e}")
@@ -3083,11 +2971,9 @@ class VideoEditorApp:
         self.draw_playhead(current_time)
         
         # 更新图表光标
-        if self.gpx_data and hasattr(self, 'update_chart_cursors'):
+        if self.gpx_data:
             gpx_offset = getattr(self, 'gpx_offset', 0.0)
             gpx_time = current_time + gpx_offset
-            
-            self.update_chart_cursors(gpx_time)
             
             # 更新对齐视图光标（如果在播放时也想看到地图上的点移动）
             if hasattr(self, 'update_align_cursor'):
