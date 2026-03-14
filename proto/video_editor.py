@@ -2210,6 +2210,58 @@ class VideoEditorApp:
                 self.export_progress_dialog = None
             self.root.after(0, self.root.config, {"cursor": ""})
     
+    def get_project_duration(self):
+        """获取项目总时长（所有片段时长之和）"""
+        if not self.video_info or not self.clips:
+            return 0.0
+        fps = self.video_info.get('fps', 30.0)
+        total_frames = sum(clip['end_frame'] - clip['start_frame'] for clip in self.clips)
+        return total_frames / fps if fps > 0 else 0.0
+
+    def get_source_frame_from_project_time(self, project_time):
+        """项目时间 -> 源视频帧"""
+        if not self.video_info or not self.clips:
+            return 0
+        fps = self.video_info.get('fps', 30.0)
+        accumulated_time = 0.0
+        for clip in self.clips:
+            clip_duration = (clip['end_frame'] - clip['start_frame']) / fps
+            if accumulated_time <= project_time < accumulated_time + clip_duration:
+                offset_time = project_time - accumulated_time
+                return clip['start_frame'] + int(offset_time * fps)
+            accumulated_time += clip_duration
+        # 超过范围返回最后一帧
+        if self.clips:
+            return self.clips[-1]['end_frame']
+        return 0
+
+    def get_project_time_from_source_frame(self, source_frame):
+        """源视频帧 -> 项目时间"""
+        if not self.video_info or not self.clips:
+            return 0.0
+        fps = self.video_info.get('fps', 30.0)
+        accumulated_time = 0.0
+        for clip in self.clips:
+            if clip['start_frame'] <= source_frame < clip['end_frame']:
+                offset_frames = source_frame - clip['start_frame']
+                return accumulated_time + (offset_frames / fps)
+            accumulated_time += (clip['end_frame'] - clip['start_frame']) / fps
+        return accumulated_time
+
+    def is_frame_in_any_clip(self, frame_pos):
+        """检查帧是否在任何片段内"""
+        for clip in self.clips:
+            if clip['start_frame'] <= frame_pos < clip['end_frame']:
+                return True
+        return False
+
+    def get_next_clip_start_frame(self, current_frame):
+        """获取下一个片段的起始帧"""
+        for clip in self.clips:
+            if clip['start_frame'] > current_frame:
+                return clip['start_frame']
+        return None
+
     # ============ 编辑功能 ============
     
     def undo(self):
@@ -2236,22 +2288,39 @@ class VideoEditorApp:
         """删除片段"""
         selected = self.clip_tree.selection()
         if selected:
-            self.clip_tree.delete(selected)
-            self.update_status("删除片段")
+            # 获取选中项的索引
+            index = self.clip_tree.index(selected[0])
+            if 0 <= index < len(self.clips):
+                # 从列表中移除
+                removed_clip = self.clips.pop(index)
+                self.update_status(f"删除片段: {removed_clip['name']}")
+                
+                # 如果没有片段了，自动添加一个覆盖全视频的片段（可选，根据需求）
+                # if not self.clips and self.video_info:
+                #     self.clips.append({
+                #         'id': 'clip_0',
+                #         'name': '全视频',
+                #         'start_frame': 0,
+                #         'end_frame': self.total_frames - 1
+                #     })
+                
+                # 更新列表和UI
+                self.update_clip_list()
+                
+                # 刷新时间轴以同步删除预览帧（缩略图）显示
+                self.draw_timeline_tracks()
+                
+                # 如果删除了当前正在查看的片段范围内的帧，或者还有片段，跳转到有效位置
+                if self.clips:
+                    new_index = min(index, len(self.clips) - 1)
+                    self.seek_to_frame(self.clips[new_index]['start_frame'])
+                else:
+                    # 如果全部删除了，跳转到开头并清空状态
+                    self.seek_to_frame(0)
         else:
             messagebox.showinfo("提示", "请先选择要删除的片段")
     
     # ============ 剪辑功能 ============
-    
-    def split_clip(self):
-        """分割片段"""
-        if not self.video_path:
-            messagebox.showwarning("警告", "请先加载视频文件！")
-            return
-        
-        current_time = self.progress_var.get()
-        self.update_status(f"在 {self.format_time(current_time)} 处分割")
-        messagebox.showinfo("分割", "视频分割功能待实现")
     
     def merge_clips(self):
         """合并片段"""
@@ -2427,6 +2496,25 @@ class VideoEditorApp:
             
             self.current_frame_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
             
+            # 检查是否还在有效片段内，如果不在，跳转到下一个片段起始位置
+            if not self.is_frame_in_any_clip(self.current_frame_pos):
+                next_start = self.get_next_clip_start_frame(self.current_frame_pos)
+                if next_start is not None:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, next_start)
+                    # 重读一次帧以更新显示
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        self.playing = False
+                        break
+                    self.current_frame_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                else:
+                    # 没有更多片段了，停止播放
+                    self.playing = False
+                    self.root.after(0, lambda: self.play_btn.config(text="▶ 播放"))
+                    self.root.after(0, lambda: self.update_status("播放完成"))
+                    self.stop_audio_playback()
+                    break
+
             # 3. 只有当距离上次显示超过一定间隔时才更新UI（避免过度刷新）
             current_time = time.time()
             # 限制UI刷新率，例如最高30fps或60fps
@@ -2440,7 +2528,8 @@ class VideoEditorApp:
                 
                 # 更新进度条 (每0.5秒更新一次，避免频繁刷新)
                 if current_time - last_display_time > 0.5:
-                    self.root.after(0, self.progress_var.set, current_seconds)
+                    project_time = self.get_project_time_from_source_frame(self.current_frame_pos)
+                    self.root.after(0, self.progress_var.set, project_time)
                     self.root.after(0, self._update_time_display, current_seconds)
                 
                 last_display_time = current_time
@@ -2961,21 +3050,25 @@ class VideoEditorApp:
             return None, None
         return sample['ele'], sample['grade']
     
-    def _update_time_display(self, current_time):
-        """更新时间显示（在主线程中调用）"""
-        duration = self.video_info.get('duration', 0)
-        self.preview_seconds_var.set(int(round(current_time)))
-        self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
+    def _update_time_display(self, source_time):
+        """更新时间显示（处理项目时间）"""
+        fps = self.video_info.get('fps', 30.0)
+        source_frame = int(source_time * fps)
+        project_time = self.get_project_time_from_source_frame(source_frame)
+        project_duration = self.get_project_duration()
         
-        # 更新播放头位置
-        self.draw_playhead(current_time)
+        self.preview_seconds_var.set(int(round(project_time)))
+        self.time_label.config(text=f"{self.format_time(project_time)} / {self.format_time(project_duration)}")
         
-        # 更新图表光标
+        # 更新播放头位置 (在项目时间轴上)
+        self.draw_playhead(project_time)
+        
+        # 更新图表/对齐光标 (使用源时间以保持与GPX同步)
         if self.gpx_data:
             gpx_offset = getattr(self, 'gpx_offset', 0.0)
-            gpx_time = current_time + gpx_offset
+            gpx_time = source_time + gpx_offset
             
-            # 更新对齐视图光标（如果在播放时也想看到地图上的点移动）
+            # 更新对齐视图光标
             if hasattr(self, 'update_align_cursor'):
                 self.update_align_cursor(gpx_time)
     
@@ -3254,19 +3347,15 @@ class VideoEditorApp:
 时长: {self.format_time(self.video_info.get('duration', 0))}
 编码: {self.video_info.get('codec', 'N/A')}"""
             
-            # self.info_text.config(state=tk.NORMAL)
-            # self.info_text.delete(1.0, tk.END)
-            # self.info_text.insert(1.0, info_text)
-            # self.info_text.config(state=tk.DISABLED)
-            
             # 更新状态栏
             self.resolution_label.config(text=f"{self.video_info.get('width', 0)}x{self.video_info.get('height', 0)}")
             self.fps_label.config(text=f"{self.video_info.get('fps', 0):.1f} fps")
             
-            # 更新进度条最大值
-            self.progress_scale.config(to=self.video_info.get('duration', 100))
+            # 更新进度条最大值 (项目总时长)
+            project_duration = self.get_project_duration()
+            self.progress_scale.config(to=project_duration)
             if hasattr(self, 'preview_spinbox'):
-                self.preview_spinbox.config(to=int(self.video_info.get('duration', 0)))
+                self.preview_spinbox.config(to=int(project_duration))
     
     def update_preview_label(self, text):
         """更新预览标签"""
@@ -3332,7 +3421,7 @@ class VideoEditorApp:
                                          anchor=tk.W, font=("Arial", 8))
     
     def draw_timeline_tracks(self):
-        """绘制时间轴轨道"""
+        """绘制时间轴轨道 (重排后：紧凑模式)"""
         self.timeline_canvas.delete("all")
         
         if not self.video_info:
@@ -3343,44 +3432,58 @@ class VideoEditorApp:
         track_height = 40
         track_y = 10
         
-        # 1. 绘制缩略图背景 (如果有)
+        # 1. 绘制缩略图背景 (只绘制存在于片段中的缩略图，并按紧凑模式排列)
         has_thumbs = hasattr(self, 'timeline_thumbnails') and self.timeline_thumbnails
         if has_thumbs:
+            # 预先计算所有有效的时间段及其在项目时间轴上的映射
+            # (source_start, source_end, project_start)
+            clip_mappings = []
+            curr_project_start = 0.0
+            for clip in self.clips:
+                duration = (clip['end_frame'] - clip['start_frame']) / fps
+                clip_mappings.append({
+                    's_start': clip['start_frame'] / fps,
+                    's_end': clip['end_frame'] / fps,
+                    'p_start': curr_project_start
+                })
+                curr_project_start += duration
+            
             # 遍历所有缩略图
             for t_sec, photo in self.timeline_thumbnails.items():
-                x = t_sec * self.timeline_scale
-                # 绘制图片，垂直居中于轨道
-                self.timeline_canvas.create_image(x, track_y + track_height/2, image=photo, anchor=tk.W)
+                # 检查该缩略图时间是否在任何片段范围内，如果是，计算其项目时间
+                for mapping in clip_mappings:
+                    if mapping['s_start'] <= t_sec <= mapping['s_end']:
+                        p_t_sec = mapping['p_start'] + (t_sec - mapping['s_start'])
+                        x = p_t_sec * self.timeline_scale
+                        self.timeline_canvas.create_image(x, track_y + track_height/2, image=photo, anchor=tk.W)
+                        break
         
+        curr_p_start = 0.0
         for i, clip in enumerate(self.clips):
-            start_time = clip['start_frame'] / fps
-            end_time = clip['end_frame'] / fps
+            duration = (clip['end_frame'] - clip['start_frame']) / fps
             
-            x1 = start_time * self.timeline_scale
-            x2 = end_time * self.timeline_scale
+            x1 = curr_p_start * self.timeline_scale
+            x2 = (curr_p_start + duration) * self.timeline_scale
             
             # 绘制片段矩形
             if has_thumbs:
-                # 如果有缩略图，只画边框，以便看到缩略图
                 self.timeline_canvas.create_rectangle(x1, track_y, x2, track_y + track_height,
                                                      fill="", outline="#4a90e2", width=2, tags=("clip", clip['id']))
-                # 增加一个半透明黑色遮罩来增加文字对比度？(Tkinter不支持)
-                # 我们可以画文字背景
             else:
-                # 原来的逻辑：实心填充
                 color = "#4a90e2" if i % 2 == 0 else "#357abd"
                 self.timeline_canvas.create_rectangle(x1, track_y, x2, track_y + track_height,
                                                      fill=color, outline="white", tags=("clip", clip['id']))
             
             # 绘制片段名称
-            if x2 - x1 > 20: # 如果够宽才显示文字
-                # 添加文字阴影效果以提高可读性
+            if x2 - x1 > 20:
                 self.timeline_canvas.create_text(x1 + 6, track_y + track_height/2 + 1,
                                                 text=clip['name'], anchor=tk.W, fill="black",
                                                 font=("Arial", 9))
                 self.timeline_canvas.create_text(x1 + 5, track_y + track_height/2,
                                                 text=clip['name'], anchor=tk.W, fill="white",
                                                 font=("Arial", 9))
+            
+            curr_p_start += duration
     
     def draw_playhead(self, current_time):
         """绘制播放头"""
@@ -3461,21 +3564,20 @@ class VideoEditorApp:
         self.on_progress_change(float(target_sec))
 
     def on_progress_change(self, value):
-        """进度条改变事件"""
+        """进度条改变事件 (处理项目时间)"""
         if self.cap is None:
             return
         
-        current_time = float(value)
-        fps = self.video_info.get('fps', 30.0)
-        frame_number = int(current_time * fps)
+        project_time = float(value)
+        source_frame = self.get_source_frame_from_project_time(project_time)
         
         # 只有在不播放时才允许手动跳转
         if not self.playing:
-            self.seek_to_frame(frame_number)
+            self.seek_to_frame(source_frame)
         
-        duration = self.video_info.get('duration', 0)
-        self.preview_seconds_var.set(int(round(current_time)))
-        self.time_label.config(text=f"{self.format_time(current_time)} / {self.format_time(duration)}")
+        project_duration = self.get_project_duration()
+        self.preview_seconds_var.set(int(round(project_time)))
+        self.time_label.config(text=f"{self.format_time(project_time)} / {self.format_time(project_duration)}")
     
     def on_clip_select(self, event):
         """片段选择事件 - 双击跳转"""
@@ -3507,7 +3609,8 @@ class VideoEditorApp:
     def timeline_fit(self):
         """时间轴适应窗口"""
         if self.video_info:
-            duration = self.video_info.get('duration', 100)
+            duration = self.get_project_duration()
+            if duration <= 0: duration = 1.0
             width = self.timeline_canvas.winfo_width()
             if width > 0:
                 self.timeline_scale = width / duration
@@ -3633,7 +3736,11 @@ class VideoEditorApp:
     
     def update_timeline(self):
         """更新时间轴显示"""
-        self.init_timeline()
+        if not self.video_info:
+            return
+        duration = self.get_project_duration()
+        self.draw_timeline_ruler(duration)
+        self.draw_timeline_tracks()
     
     def generate_thumbnail(self):
         """生成视频缩略图"""
