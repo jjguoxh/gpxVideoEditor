@@ -2,7 +2,7 @@
 
 import numpy as np
 import cv2
-from .base import HudPanel
+from ..base import HudPanel
 
 class ElevationPanel(HudPanel):
     def __init__(self, config=None):

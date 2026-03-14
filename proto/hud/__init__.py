@@ -45,3 +45,9 @@ except Exception:
         from .porsche911 import Porsche911Panel  # legacy layout
     except Exception:
         Porsche911Panel = None
+
+# Back Style
+try:
+    from .speed.back import BackPanel  # new layout
+except Exception:
+    BackPanel = None

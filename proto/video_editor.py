@@ -23,11 +23,11 @@ import json
 import re
 import signal
 try:
-    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel
+    from .hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel, BackPanel
     from .hud_settings_dialog import HudSettingsDialog
 except ImportError:
     # Fallback for running as a script
-    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel
+    from hud import ElevationPanel, TelemetryPanel, TrackPanel, SpeedometerPanel, Porsche911Panel, BackPanel
     from hud_settings_dialog import HudSettingsDialog
 
 # 尝试导入numpy用于错误处理
@@ -507,9 +507,6 @@ class VideoEditorApp:
         control_frame.pack(fill=tk.X, pady=5)
         
         # 控件
-        self.align_reverse_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(control_frame, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.TOP, anchor=tk.E, padx=5)
-        
         self.align_progress_var = tk.DoubleVar(value=0.0)
         self.align_scale = ttk.Scale(control_frame, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
         self.align_scale.pack(fill=tk.X, padx=5, pady=5)
@@ -691,8 +688,6 @@ class VideoEditorApp:
     #     self.align_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
     #     bottom = ttk.Frame(parent)
     #     bottom.pack(fill=tk.X, padx=6, pady=6)
-    #     self.align_reverse_var = tk.BooleanVar(value=False)
-    #     ttk.Checkbutton(bottom, text="反向", variable=self.align_reverse_var, command=self.update_align_canvas).pack(side=tk.RIGHT, padx=6)
     #     self.align_progress_var = tk.DoubleVar(value=0.0)
     #     self.align_scale = ttk.Scale(bottom, from_=0.0, to=0.0, orient=tk.HORIZONTAL, variable=self.align_progress_var, command=self.on_align_progress_change)
     #     self.align_scale.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=6)
@@ -755,10 +750,6 @@ class VideoEditorApp:
         
         # 计算当前视频时刻应该对应的GPX时刻
         estimated_gpx_time = current_video_time + gpx_offset
-        
-        # 考虑倒放选项（虽然加载时通常未勾选，但为了严谨）
-        if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get():
-             estimated_gpx_time = duration - estimated_gpx_time
              
         # 限制在范围内
         estimated_gpx_time = max(0.0, min(duration, estimated_gpx_time))
@@ -988,9 +979,7 @@ class VideoEditorApp:
             self.align_canvas.create_line(flat_pts, fill="#00FF00", width=2, tags="track")
             
         t = self.align_progress_var.get()
-        duration = self.get_gpx_duration()
-        eff_t = duration - t if self.align_reverse_var.get() else t
-        lat, lon = self._get_latlon_at_gpx_time(eff_t)
+        lat, lon = self._get_latlon_at_gpx_time(t)
         
         if lat is not None and lon is not None:
             x, y = tf(lat, lon)
@@ -1014,18 +1003,7 @@ class VideoEditorApp:
             return
             
         # 1. 更新滑块和时间标签
-        # 注意：align_progress_var 在反向模式下需要反转逻辑
-        duration = self.get_gpx_duration()
         slider_val = gpx_time
-        
-        # 如果当前是反向模式，align_progress_var 应该显示 "倒数" 的时间还是正向时间？
-        # 参考 update_align_controls: 
-        # if reverse: estimated_gpx_time = duration - estimated_gpx_time
-        # self.align_progress_var.set(estimated_gpx_time)
-        # 所以 align_progress_var 存储的是 "显示值"
-        
-        if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get():
-            slider_val = duration - gpx_time
             
         # 更新变量（避免触发 on_align_progress_change 回调导致循环调用，或者接受它）
         # on_align_progress_change 会调用 update_align_canvas 和 update_chart_cursors
@@ -1095,23 +1073,19 @@ class VideoEditorApp:
             v = float(value)
         except:
             v = 0.0
-        duration = self.get_gpx_duration()
-        eff_v = duration - v if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get() else v
-        # self.align_time_label.config(text=f"GPX时间: {eff_v:.1f}s")
+        # self.align_time_label.config(text=f"GPX时间: {v:.1f}s")
         self.update_align_canvas()
         
         # 更新图表光标
         if hasattr(self, 'update_chart_cursors'):
-            self.update_chart_cursors(eff_v)
+            self.update_chart_cursors(v)
     
     def align_confirm(self):
         if not (isinstance(self.gpx_data, dict) and 'segments' in self.gpx_data and self.gpx_data['segments']):
             messagebox.showwarning("提示", "未加载GPX数据")
             return
         current_video_time = self._current_time()
-        raw_gpx_time = self.align_progress_var.get()
-        duration = self.get_gpx_duration()
-        selected_gpx_time = duration - raw_gpx_time if self.align_reverse_var.get() else raw_gpx_time
+        selected_gpx_time = self.align_progress_var.get()
         self.gpx_offset = selected_gpx_time - current_video_time
         self.update_status(f"设置偏移: {self.gpx_offset:+.2f}s")
         if self.cap is not None:
@@ -3112,11 +3086,6 @@ class VideoEditorApp:
         if self.gpx_data and hasattr(self, 'update_chart_cursors'):
             gpx_offset = getattr(self, 'gpx_offset', 0.0)
             gpx_time = current_time + gpx_offset
-            
-            # 处理反向
-            if getattr(self, 'align_reverse_var', None) and self.align_reverse_var.get():
-                gpx_duration = self.get_gpx_duration()
-                gpx_time = gpx_duration - gpx_time
             
             self.update_chart_cursors(gpx_time)
             

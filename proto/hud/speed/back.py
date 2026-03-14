@@ -2,7 +2,7 @@ import math
 import cv2
 import numpy as np
 import os
-from .base import HudPanel
+from ..base import HudPanel
 
 class BackPanel(HudPanel):
     def __init__(self, config=None):
